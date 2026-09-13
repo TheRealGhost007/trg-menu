@@ -26,6 +26,7 @@ Item {
   property real rowReservedBorderRight: 0
   property int rowSpacing: Style.spacing.xs
   property int dividerHeight: Style.space(17)
+  property int categoryHeaderHeight: Style.space(28)
   property int baseRowHeight: Style.space(50)
   property int detailRowHeight: Style.space(58)
 
@@ -88,6 +89,7 @@ Item {
       rowReservedBorderRight: root.rowReservedBorderRight
       rowSpacing: root.rowSpacing
       dividerHeight: root.dividerHeight
+      categoryHeaderHeight: root.categoryHeaderHeight
       baseRowHeight: root.baseRowHeight
       detailRowHeight: root.detailRowHeight
       appIconSource: function(icon) { return root.appSource.iconSource(icon) }

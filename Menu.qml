@@ -126,6 +126,7 @@ Item {
   property int rowPeek: Math.round(baseRowHeight * 0.55)
   property int rowSpacing: Style.spacing.xs
   property int dividerHeight: Style.space(17)
+  readonly property int categoryHeaderHeight: Style.space(28)
   property bool searchDivider: false
   property int layoutSerial: 0
 
@@ -198,6 +199,11 @@ Item {
   readonly property int browseListWidth: Style.space(300)
   readonly property int infoPanelWidth: Style.space(260)
   readonly property int browseGap: Style.space(14)
+  // The persistent nav shows on Home and while browsing Apps/Web Apps/
+  // Recent — every destination it links to — but not in a plain drilldown
+  // submenu (Trigger/Style/Setup/...) or dmenu, which keep today's simpler
+  // header+list card.
+  readonly property bool sidebarMode: root.tileMode || root.appBrowseMode
 
   // Named *Service/*Store, not appSource/pinStore/recentStore — a component
   // property sharing the instance's own name silently self-references instead
@@ -232,15 +238,43 @@ Item {
   }
 
   function refreshAppRows() {
+    // The debounce upstream (appRowsRefreshDebounce) already stops a Steam
+    // churn burst from rebuilding on every blip; this covers the case it
+    // doesn't: a single settled rebuild (a real install/uninstall, Steam or
+    // otherwise) still reshuffles alphabetical positions, and rebuildDisplay()
+    // only clamps selectedIndex numerically — it doesn't re-find the same
+    // row. Without this, browsing Apps while an unrelated app installs could
+    // silently move your cursor onto a different app. Category-grouping
+    // Steam (see the "apps" sort above) already limits *how far* such a
+    // reshuffle can reach; this closes the remaining gap by id instead of
+    // index.
+    var selectedId = (root.cursorActive && root.selectedIndex >= 0 && root.selectedIndex < displayModel.count)
+      ? displayModel.get(root.selectedIndex).itemId : ""
+
     var rows = appSourceService.buildRows()
     var merged = MenuData.mergeAppRows(root.items, root.itemOrder, rows.apps.concat(rows.webapps))
     root.items = merged.items
     root.itemOrder = merged.itemOrder
-    if (root.opened) root.rebuildDisplay()
+    if (root.opened) {
+      root.rebuildDisplay()
+      if (selectedId) root.restoreSelectionById(selectedId)
+    }
+  }
+
+  // Re-finds a row by itemId after a rebuild and restores selectedIndex to
+  // its new position. A no-op (falls through to rebuildDisplay's own clamp)
+  // if the row no longer exists — e.g. the selected app was just uninstalled.
+  function restoreSelectionById(itemId) {
+    for (var i = 0; i < displayModel.count; i++) {
+      if (displayModel.get(i).itemId === itemId) {
+        root.selectedIndex = i
+        return
+      }
+    }
   }
 
   property int cardWidth: Math.min(root.tileMode ? Math.ceil(sidebarWidth + sidebarContentGap + tileGridWidth + contentMargin * 2 + cardBorderInsetH)
-      : root.appBrowseMode ? Math.ceil(browseListWidth + browseGap + infoPanelWidth + contentMargin * 2 + cardBorderInsetH)
+      : root.appBrowseMode ? Math.ceil(sidebarWidth + sidebarContentGap + browseListWidth + browseGap + infoPanelWidth + contentMargin * 2 + cardBorderInsetH)
       : (root.dmenuActive ? Style.space(root.dmenuWidth) : ((root.activeMenu === "trigger.capture.screenrecord" || root.activeMenu === "style.font") ? Style.space(520) : Style.space(300))), panel.width - Style.gapsOut * 2)
   property int visibleRowsHeight: root.tileMode ? homeContentHeight : (root.dmenuActive ? dmenuRowListHeight(layoutSerial, displayModel.count, filterText) : rowListHeight(layoutSerial, displayModel.count, filterText, searchDivider))
   property int cardHeight: root.dmenuActive
@@ -324,7 +358,14 @@ Item {
     for (var i = 0; i < displayModel.count; i++) {
       var row = displayModel.get(i)
       if (i > 0) total += root.rowSpacing
-      if (row.section === "drilldown" && previousSection !== "drilldown") total += root.dividerHeight
+      // A search's drilldown divider and an Apps category header are both
+      // "entering a new section" — the same displayModel.section field, just
+      // used for two different purposes depending on the view (search vs.
+      // plain browse never happen at once, so there's no ambiguity).
+      if (row.section !== previousSection) {
+        if (row.section === "drilldown") total += root.dividerHeight
+        else if (row.section) total += root.categoryHeaderHeight
+      }
       total += root.rowHeightForDetail(row.detail)
       previousSection = row.section
       totals.push(total)
@@ -782,8 +823,27 @@ Item {
 
       // DesktopEntries can reorder its values when an application starts.
       // Keep the Apps/Web Apps menus alphabetical independently of that.
+      // Apps additionally group by category first (Steam's per-game
+      // shortcuts always last — see AppSource.categoryFor()), so a Steam
+      // install/uninstall reshuffling that one group never moves the index
+      // of an unrelated app that happens to sort near it alphabetically.
+      // Recent/Web Apps stay flat — recency order and a single flat list
+      // respectively are the point of those views. One comparator (not a
+      // category pass after an alphabetical pass) so correctness never
+      // depends on Array.sort being stable.
+      if (active === "apps") {
+        for (var ci = 0; ci < rows.length; ci++) {
+          var catItem = root.item(rows[ci].itemId)
+          rows[ci].section = (catItem && catItem.category) || "Other"
+        }
+      }
       if (active === "apps" || active === "webapps") {
         rows.sort(function(a, b) {
+          if (active === "apps" && a.section !== b.section) {
+            if (a.section === "Steam") return 1
+            if (b.section === "Steam") return -1
+            return a.section < b.section ? -1 : 1
+          }
           var aLabel = String(a.label || "").toLowerCase()
           var bLabel = String(b.label || "").toLowerCase()
           if (aLabel < bLabel) return -1
@@ -1287,7 +1347,7 @@ Item {
             return
           }
 
-          if (root.tileMode && event.key === Qt.Key_Tab) {
+          if (root.sidebarMode && event.key === Qt.Key_Tab) {
             root.sidebarFocused = !root.sidebarFocused
             if (root.sidebarFocused) root.sidebarFocusIndex = root.sidebarIndexFor(root.activeMenu)
             event.accepted = true
@@ -1393,15 +1453,14 @@ Item {
         anchors.rightMargin: card.contentRightInset
         anchors.bottomMargin: card.contentBottomInset
         anchors.leftMargin: card.contentLeftInset
-        spacing: root.tileMode ? root.sidebarContentGap : 0
+        spacing: root.sidebarMode ? root.sidebarContentGap : 0
 
-        // Home-only persistent nav (Home/Apps/Web Apps/Recent/Settings).
-        // Plain submenus and dmenu keep today's simple header+list card —
-        // extending the sidebar to Apps/Web Apps browsing is stage 4.
+        // Persistent nav on Home and while browsing Apps/Web Apps/Recent.
+        // Plain submenus and dmenu keep today's simple header+list card.
         Sidebar {
           id: sidebar
-          visible: root.tileMode
-          width: root.tileMode ? root.sidebarWidth : 0
+          visible: root.sidebarMode
+          width: root.sidebarMode ? root.sidebarWidth : 0
           height: parent.height
           activeDestination: root.sidebarDestinationFor(root.activeMenu)
           focused: root.sidebarFocused
@@ -1413,7 +1472,7 @@ Item {
         }
 
         Column {
-          width: parent.width - (root.tileMode ? (root.sidebarWidth + root.sidebarContentGap) : 0)
+          width: parent.width - (root.sidebarMode ? (root.sidebarWidth + root.sidebarContentGap) : 0)
           height: parent.height
           spacing: root.contentSpacing
 
@@ -1539,6 +1598,7 @@ Item {
       rowReservedBorderRight: root.rowReservedBorderRight
       rowSpacing: root.rowSpacing
       dividerHeight: root.dividerHeight
+      categoryHeaderHeight: root.categoryHeaderHeight
       baseRowHeight: root.baseRowHeight
       detailRowHeight: root.detailRowHeight
       onHoverSelect: function(index, item, mouse) { root.selectFromPointer(index, item, mouse) }
@@ -1569,6 +1629,7 @@ Item {
       rowReservedBorderRight: root.rowReservedBorderRight
       rowSpacing: root.rowSpacing
       dividerHeight: root.dividerHeight
+      categoryHeaderHeight: root.categoryHeaderHeight
       baseRowHeight: root.baseRowHeight
       detailRowHeight: root.detailRowHeight
       listWidth: root.browseListWidth

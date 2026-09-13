@@ -62,6 +62,34 @@ Item {
     return /^\s*(omarchy-launch-webapp|omarchy-webapp-handler)\b/.test(String((entry && entry.execString) || ""))
   }
 
+  // Steam writes/rewrites one .desktop file per installed game, repeatedly,
+  // in the background — the confirmed cause of a past hitching incident (see
+  // the appRowsRefreshDebounce comment in Menu.qml). Detecting these lets the
+  // Apps browser put them in their own "Steam" category: real games stay
+  // easy to find as a group, and — the actual stability win — a game being
+  // added/removed no longer shifts the alphabetical position of every
+  // unrelated app that happens to sort after it. `steam://rungameid/` is the
+  // exec pattern Steam's own generated shortcuts use; the Steam client's own
+  // launcher entry has no rungameid and is categorized normally.
+  function isSteamApp(entry) {
+    return /steam:\/\/rungameid\//i.test(String((entry && entry.execString) || ""))
+  }
+
+  // First recognized top-level freedesktop category, e.g. "Game" or
+  // "Development" — skips qualifiers like "GTK"/"Qt"/"X-*" that mean nothing
+  // to a user. Falls back to "Other" for an app that declares none.
+  readonly property var primaryCategories: ["Game", "Development", "Graphics", "Network",
+    "Office", "AudioVideo", "System", "Settings", "Utility", "Education"]
+
+  function categoryFor(entry) {
+    if (root.isSteamApp(entry)) return "Steam"
+    var cats = (entry && entry.categories && typeof entry.categories.join === "function") ? entry.categories : []
+    for (var i = 0; i < cats.length; i++) {
+      if (root.primaryCategories.indexOf(cats[i]) >= 0) return cats[i]
+    }
+    return "Other"
+  }
+
   function entryName(entry) {
     return String((entry && entry.name) || (entry && entry.id) || "")
   }
@@ -150,7 +178,8 @@ Item {
         checked: "",
         order: 0,
         comment: String(entry.comment || ""),
-        categoriesText: categoriesText
+        categoriesText: categoriesText,
+        category: isWeb ? "" : root.categoryFor(entry)
       })
     }
 

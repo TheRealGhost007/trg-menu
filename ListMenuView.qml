@@ -26,6 +26,7 @@ Item {
   property real rowReservedBorderRight: 0
   property int rowSpacing: Style.spacing.xs
   property int dividerHeight: Style.space(17)
+  property int categoryHeaderHeight: Style.space(28)
   property int baseRowHeight: Style.space(50)
   property int detailRowHeight: Style.space(58)
   property int rowPeek: Math.round(baseRowHeight * 0.55)
@@ -71,14 +72,22 @@ Item {
 
     section.property: "section"
     section.criteria: ViewSection.FullString
+    // The same `section` field serves two mutually-exclusive views: a
+    // search's "drilldown" divider (a plain hairline), and — only ever set
+    // when the other is not — an Apps category header (e.g. "Steam") as a
+    // text label. Never both in the same displayModel at once.
     section.delegate: Item {
+      id: sectionDelegate
       required property string section
+      readonly property bool isDrilldown: section === "drilldown"
+      readonly property bool isCategory: section.length > 0 && !isDrilldown
 
       width: ListView.view.width
-      height: section === "drilldown" ? root.dividerHeight : 0
-      visible: section === "drilldown"
+      height: isDrilldown ? root.dividerHeight : (isCategory ? root.categoryHeaderHeight : 0)
+      visible: isDrilldown || isCategory
 
       Rectangle {
+        visible: sectionDelegate.isDrilldown
         anchors.left: parent.left
         anchors.leftMargin: Style.space(4)
         anchors.right: parent.right
@@ -86,6 +95,20 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         height: Style.spacing.hairline
         color: Util.alpha(root.foreground, 0.2)
+      }
+
+      Text {
+        visible: sectionDelegate.isCategory
+        textFormat: Text.PlainText
+        text: sectionDelegate.section
+        color: root.foreground
+        opacity: 0.55
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        font.weight: Font.Medium
+        anchors.left: parent.left
+        anchors.leftMargin: root.rowReservedBorderLeft + Style.space(10)
+        anchors.verticalCenter: parent.verticalCenter
       }
     }
 
