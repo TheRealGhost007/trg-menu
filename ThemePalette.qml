@@ -10,11 +10,31 @@ import qs.Commons
 // exposes foreground/background/accent/urgent/muted for shell surfaces, so
 // this reads colors.toml directly via a watched FileView, the same pattern
 // Menu.qml already uses for the JSONC menu sources.
+//
+// Also the design-token surface for the Windows-11-style redesign (Sidebar/
+// HomeView/AppTileRow): rather than a second hardcoded palette, these compose
+// Color.menu.*/Color.{foreground,accent,urgent} with Style.qml's own existing
+// hover/selected state-color system (Style.hoverFillFor etc.) — reusing the
+// shell's design system instead of inventing a parallel one.
 Item {
   id: root
 
   readonly property string path: Quickshell.env("HOME") + "/.local/state/omarchy/current/theme/colors.toml"
   property var palette: []
+
+  // ------------------------------------------------------------ design tokens
+  readonly property color textPrimary: Color.menu.text
+  readonly property color textSecondary: Util.alpha(Color.menu.text, 0.6)
+  readonly property color surface: Util.alpha(Color.foreground, 0.035)
+  readonly property color surfaceElevated: Util.alpha(Color.foreground, 0.065)
+  readonly property color borderMuted: Util.alpha(Color.foreground, 0.14)
+  readonly property color hoverFill: Style.hoverFillFor(Color.foreground, Color.accent, Color.urgent)
+  readonly property color hoverBorder: Style.hoverBorderFor(Color.foreground, Color.accent, Color.urgent)
+  readonly property color selectedFill: Color.menu.selectedBackground
+  readonly property color selectedTextColor: Color.menu.selectedText
+  readonly property color selectedBorderColor: Color.menu.selectedBorder
+  readonly property color accent: Color.accent
+  readonly property color destructive: Color.urgent
 
   function parse(raw) {
     var text = String(raw || "")

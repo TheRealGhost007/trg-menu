@@ -24,6 +24,9 @@ Item {
   id: root
 
   required property string omarchyPath
+  // Set by Menu.qml to the shared RecentStore instance. Optional so this file
+  // stays testable/usable standalone; launch() just skips recording if unset.
+  property var recentStore: null
 
   // ---------------------------------------------------------- hidden apps
   // Same curated "don't clutter the launcher with config utilities" list
@@ -163,6 +166,7 @@ Item {
     var id = String(desktopId || "")
     if (!id) return
     Util.execDetached("uwsm-app -- gtk-launch " + Util.shellQuote(id + ".desktop"))
+    if (root.recentStore) root.recentStore.recordLaunch(id)
   }
 
   function remove(desktopId, name) {

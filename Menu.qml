@@ -82,6 +82,22 @@ Item {
   property var providerQueue: []
   property int providerRevision: 0
 
+  // Sidebar keyboard focus (Home-only). Tab toggles into/out of it; while
+  // focused, Up/Down move the highlight and Enter/Right navigate. Any other
+  // key drops focus back to the content grid first (see keyCatcher below) so
+  // typing to search never leaves a stale sidebar highlight showing.
+  property bool sidebarFocused: false
+  property int sidebarFocusIndex: 0
+
+  function sidebarIndexFor(menuId) {
+    var destinationId = root.sidebarDestinationFor(menuId)
+    var destinations = MenuData.homeDestinations()
+    for (var i = 0; i < destinations.length; i++) {
+      if (destinations[i].id === destinationId) return i
+    }
+    return 0
+  }
+
   property bool deleteConfirmOpen: false
   property var deleteTarget: null
   onOpenedChanged: if (!opened) { deleteConfirmOpen = false; deleteTarget = null }
@@ -132,9 +148,42 @@ Item {
   // cardWidth (below) still clamps to the screen, so a narrow output fits
   // fewer than tileIdealColumns — derive the real count from the width it
   // actually got, or height/keyboard nav would assume columns never drawn.
-  readonly property int tileContentWidth: cardWidth - contentMargin * 2 - cardBorderInsetH
+  readonly property int sidebarWidth: Style.space(176)
+  readonly property int sidebarContentGap: Style.space(18)
+  readonly property int tileContentWidth: cardWidth - contentMargin * 2 - cardBorderInsetH - (root.tileMode ? (sidebarWidth + sidebarContentGap) : 0)
   readonly property int tileColumns: root.tileMode ? Math.max(1, Math.floor(tileContentWidth / tileCellSize)) : tileIdealColumns
   readonly property int tileGridHeight: Math.ceil(Math.max(1, displayModel.count) / tileColumns) * tileCellSize
+
+  // Section boundaries within displayModel when tileMode is active: rows
+  // [0, pinned) are Pinned, [pinned, +recent) are Recent, the rest are
+  // "more" tiles. Recomputed by rebuildDisplay(), and always written as one
+  // object in one property write (never two separate int properties) — two
+  // sequential writes would fire HomeView's bindings twice, the first time
+  // with only one of the two counts updated against the other's stale value,
+  // risking an out-of-range ListModel.get() in HomeView.sliceFor().
+  property var homeSections: ({ pinned: 0, recent: 0 })
+  readonly property int homeMoreCount: Math.max(0, displayModel.count - homeSections.pinned - homeSections.recent)
+  // Estimated section-title row height (label + gap before its tile grid) —
+  // must stay close to AppTileRow.qml's actual titleText.implicitHeight +
+  // Style.space(8), since this feeds the card's own height budget ahead of
+  // AppTileRow ever being instantiated. A few px of drift is a cosmetic risk
+  // (a hair of clipping/slack), not a functional one.
+  readonly property int homeTitleHeight: Style.font.bodySmall + Style.space(10)
+  readonly property int homeSectionGap: Style.space(20)
+
+  function homeContentHeightFor(_serial, _sections, _more, _columns) {
+    var sections = 0
+    var h = 0
+    if (root.homeSections.pinned > 0) { h += root.homeTitleHeight + Math.ceil(root.homeSections.pinned / root.tileColumns) * root.tileCellSize; sections++ }
+    if (root.homeSections.recent > 0) { h += root.homeTitleHeight + Math.ceil(root.homeSections.recent / root.tileColumns) * root.tileCellSize; sections++ }
+    if (root.homeMoreCount > 0) {
+      h += (sections > 0 ? root.homeTitleHeight : 0) + Math.ceil(root.homeMoreCount / root.tileColumns) * root.tileCellSize
+      sections++
+    }
+    h += Math.max(0, sections - 1) * root.homeSectionGap
+    return Math.max(h, root.tileCellSize)
+  }
+  readonly property int homeContentHeight: homeContentHeightFor(layoutSerial, homeSections, homeMoreCount, tileColumns)
 
   ThemePalette { id: themePalette }
 
@@ -142,12 +191,21 @@ Item {
   // Apps/Web Apps get a wider card with a side panel showing details for
   // whichever row is highlighted. Every other submenu, dmenu mode, and the
   // root tile grid are unaffected.
-  readonly property bool appBrowseMode: !root.dmenuActive && (root.activeMenu === "apps" || root.activeMenu === "webapps")
+  // "recent" is a synthetic menu id (no JSONC entry, no provider) — it reuses
+  // AppBrowserView exactly like apps/webapps, just fed a recency-ordered row
+  // set built in rebuildDisplay() instead of the full alphabetical app list.
+  readonly property bool appBrowseMode: !root.dmenuActive && (root.activeMenu === "apps" || root.activeMenu === "webapps" || root.activeMenu === "recent")
   readonly property int browseListWidth: Style.space(300)
   readonly property int infoPanelWidth: Style.space(260)
   readonly property int browseGap: Style.space(14)
 
-  AppSource { id: appSourceService; omarchyPath: root.omarchyPath }
+  // Named *Service/*Store, not appSource/pinStore/recentStore — a component
+  // property sharing the instance's own name silently self-references instead
+  // of resolving to this outer one when wired into a view (see project memory
+  // on AppBrowserView's `appSource` property collision).
+  PinStore { id: pinStoreService }
+  RecentStore { id: recentStoreService }
+  AppSource { id: appSourceService; omarchyPath: root.omarchyPath; recentStore: recentStoreService }
 
   // Debounced: some environments (Steam is a known offender — it rewrites
   // its games' .desktop files repeatedly in the background) make
@@ -163,7 +221,7 @@ Item {
   Connections {
     target: appSourceService
     function onRowsChanged() {
-      if (root.providersLoaded["apps"] || root.providersLoaded["webapps"]) appRowsRefreshDebounce.restart()
+      if (root.providersLoaded["apps"] || root.providersLoaded["webapps"] || root.providersLoaded["recent"]) appRowsRefreshDebounce.restart()
     }
   }
 
@@ -181,10 +239,10 @@ Item {
     if (root.opened) root.rebuildDisplay()
   }
 
-  property int cardWidth: Math.min(root.tileMode ? Math.ceil(tileGridWidth + contentMargin * 2 + cardBorderInsetH)
+  property int cardWidth: Math.min(root.tileMode ? Math.ceil(sidebarWidth + sidebarContentGap + tileGridWidth + contentMargin * 2 + cardBorderInsetH)
       : root.appBrowseMode ? Math.ceil(browseListWidth + browseGap + infoPanelWidth + contentMargin * 2 + cardBorderInsetH)
       : (root.dmenuActive ? Style.space(root.dmenuWidth) : ((root.activeMenu === "trigger.capture.screenrecord" || root.activeMenu === "style.font") ? Style.space(520) : Style.space(300))), panel.width - Style.gapsOut * 2)
-  property int visibleRowsHeight: root.tileMode ? tileGridHeight : (root.dmenuActive ? dmenuRowListHeight(layoutSerial, displayModel.count, filterText) : rowListHeight(layoutSerial, displayModel.count, filterText, searchDivider))
+  property int visibleRowsHeight: root.tileMode ? homeContentHeight : (root.dmenuActive ? dmenuRowListHeight(layoutSerial, displayModel.count, filterText) : rowListHeight(layoutSerial, displayModel.count, filterText, searchDivider))
   property int cardHeight: root.dmenuActive
     ? Math.min(contentMargin * 2 + headerHeight + (mode === "input" ? 0 : contentSpacing + visibleRowsHeight), panel.height - Style.gapsOut * 2)
     : Math.min(contentMargin * 2 + headerHeight + contentSpacing + visibleRowsHeight, panel.height - Style.gapsOut * 2)
@@ -293,8 +351,29 @@ Item {
     return foldedListHeight(totals, available)
   }
 
+  // Home's greeting header. Recomputed whenever tileMode flips true (the
+  // property read makes it a binding dependency), which covers every menu
+  // open/close — freshness beyond that isn't worth tracking a clock for.
+  function greetingText() {
+    var hour = new Date().getHours()
+    var part = hour < 5 ? "night" : hour < 12 ? "morning" : hour < 17 ? "afternoon" : hour < 21 ? "evening" : "night"
+    var user = Quickshell.env("USER") || Quickshell.env("LOGNAME") || "there"
+    return "Good " + part + ", " + user
+  }
+
   function item(id) {
     return root.items[id] || null
+  }
+
+  // Pinned/recent store rows only, ever: a bare desktop appId (e.g.
+  // "firefox"), not a full item id. Apps and webapps share the same
+  // namespace, so check both parents; returns null (silently) for an
+  // uninstalled/renamed app rather than throwing — pin/recent lists are
+  // allowed to hold a stale id that simply never renders.
+  function appItemForId(appId) {
+    var id = String(appId || "")
+    if (!id) return null
+    return root.items["apps." + id] || root.items["webapps." + id] || null
   }
 
   // ------------------------------------------------------------------
@@ -449,6 +528,19 @@ Item {
   }
 
   function loadProviderForMenu(id) {
+    // Recent has no JSONC entry/provider of its own — it just needs the same
+    // native app rows apps/webapps load, so opening Recent directly (without
+    // ever visiting Apps first) still resolves real entries.
+    if (id === "recent") {
+      if (!root.providersLoaded["recent"]) {
+        root.providersLoaded["recent"] = true
+        root.providersLoaded["apps"] = true
+        root.providersLoaded["webapps"] = true
+        root.refreshAppRows()
+      }
+      return
+    }
+
     var entry = root.item(id)
     if (!entry || !entry.provider || root.providersLoaded[id]) return
 
@@ -603,13 +695,24 @@ Item {
 
     if (!root.rowsLoaded) return
 
-    var active = root.item(root.activeMenu) ? root.activeMenu : "root"
+    var active = (root.activeMenu === "recent" || root.item(root.activeMenu)) ? root.activeMenu : "root"
     root.activeMenu = active
     var rows = []
     var query = root.filterText.trim()
     root.searchDivider = false
 
-    if (query) {
+    if (query && active === "recent") {
+      // Recent isn't a real parent in the items graph, so the generic
+      // isDescendantOf() search below always comes back empty for it —
+      // filter the same recency-ordered id list directly instead.
+      var recentQuery = query.toLowerCase()
+      var recentSearchIds = recentStoreService.recentIds
+      for (var rq = 0; rq < recentSearchIds.length; rq++) {
+        var recentQueryEntry = root.appItemForId(recentSearchIds[rq])
+        if (recentQueryEntry && root.matchesQuery(recentQueryEntry, recentQuery))
+          rows.push(root.displayRow(recentQueryEntry, recentQueryEntry.description, rq))
+      }
+    } else if (query) {
       var currentRows = []
       var drilldownRows = []
 
@@ -637,11 +740,22 @@ Item {
         for (var d = 0; d < drilldownRows.length; d++) drilldownRows[d].section = "drilldown"
       }
       rows = currentRows.concat(drilldownRows)
+    } else if (active === "recent") {
+      // Synthetic menu, not a real JSONC id — no siblings/guards apply.
+      // Order is recency, never re-sorted.
+      var recentIds = recentStoreService.recentIds
+      for (var r = 0; r < recentIds.length; r++) {
+        var recentEntry = root.appItemForId(recentIds[r])
+        if (recentEntry) rows.push(root.displayRow(recentEntry, recentEntry.description, r))
+      }
     } else {
       var siblings = []
       for (var j = 0; j < root.itemOrder.length; j++) {
         var child = root.item(root.itemOrder[j])
         if (!child || child.parent !== active) continue
+        // Apps/Web Apps/Settings get their own Sidebar destination in Home —
+        // omitting them here avoids listing the same destination twice.
+        if (root.tileMode && (child.id === "apps" || child.id === "webapps" || child.id === "setup")) continue
         if (!root.isVisible(child)) continue
         siblings.push(child)
       }
@@ -683,7 +797,48 @@ Item {
       }
     }
 
+    // Home prepends Pinned then Recent app tiles ahead of the "more" tiles
+    // built above — one flat displayModel/selectedIndex, as everywhere else
+    // in this file, with the section boundaries recorded for HomeView to
+    // draw section headers/rows at the right offsets.
+    //
+    // homePinnedCount/homeRecentCount are only assigned *after* displayModel
+    // is fully repopulated below (never here) even though the counts are
+    // known now: each is a plain `property int` on root, so writing it fires
+    // HomeView's pinnedCount/recentCount bindings — and their sliceFor()
+    // dependency — synchronously, mid-function, however displayModel.clear()
+    // above has already run and the new rows aren't appended yet. Assigning
+    // a non-zero count against that briefly-empty/stale model would have
+    // sliceFor() call ListModel.get() out of range.
+    var nextHomePinnedCount = 0
+    var nextHomeRecentCount = 0
+    if (root.tileMode && !query) {
+      var pinnedRows = []
+      var pinnedIds = pinStoreService.pinnedIds
+      var pinnedSet = ({})
+      for (var p = 0; p < pinnedIds.length; p++) {
+        var pinnedEntry = root.appItemForId(pinnedIds[p])
+        if (!pinnedEntry) continue
+        pinnedSet[pinnedIds[p]] = true
+        pinnedRows.push(root.displayRow(pinnedEntry, pinnedEntry.description, p))
+      }
+      var homeRecentRows = []
+      var homeRecentIds = recentStoreService.recentIds
+      for (var hr = 0; hr < homeRecentIds.length; hr++) {
+        if (pinnedSet[homeRecentIds[hr]]) continue
+        var homeRecentEntry = root.appItemForId(homeRecentIds[hr])
+        if (!homeRecentEntry) continue
+        homeRecentRows.push(root.displayRow(homeRecentEntry, homeRecentEntry.description, hr))
+      }
+      nextHomePinnedCount = pinnedRows.length
+      nextHomeRecentCount = homeRecentRows.length
+      rows = pinnedRows.concat(homeRecentRows, rows)
+    }
+
     for (var k = 0; k < rows.length; k++) displayModel.append(rows[k])
+    // One write, after displayModel already holds every row these counts
+    // describe — see the comment on the homeSections property declaration.
+    root.homeSections = { pinned: nextHomePinnedCount, recent: nextHomeRecentCount }
     layoutSerial += 1
 
     if (displayModel.count === 0) selectedIndex = 0
@@ -727,7 +882,8 @@ Item {
 
   function setActiveMenu(id, pushHistory, fromPointer) {
     panel.freezeCardTop()
-    if (!root.item(id)) id = "root"
+    root.sidebarFocused = false
+    if (id !== "recent" && !root.item(id)) id = "root"
     if (pushHistory && id !== root.activeMenu) root.navStack = root.navStack.concat([root.activeMenu])
     root.activeMenu = id
     root.filterText = ""
@@ -838,15 +994,28 @@ Item {
     requestActive = false
     selectionFile = ""
     doneFile = ""
-    activeMenu = root.item(initialMenu) ? initialMenu : "root"
+    activeMenu = (initialMenu === "recent" || root.item(initialMenu)) ? initialMenu : "root"
     navStack = []
     filterText = ""
     selectedIndex = 0
     cursorActive = true
+    root.sidebarFocused = false
     root.disarmPointer()
     root.evaluateGuards()
     opened = true
-    rebuildDisplay()
+    // Home's Pinned/Recent rows need real app rows resolvable immediately,
+    // not only after the user has drilled into Apps/Web Apps at least once.
+    // This is a plain in-memory merge of DesktopEntries' already-resident
+    // list (see AppSource.buildRows()) — no filesystem scan, so it's cheap
+    // enough to just always do on open rather than only when non-empty.
+    // refreshAppRows() already calls rebuildDisplay() once opened is true
+    // (set above) — don't call it again here, a second back-to-back
+    // clear()+rebuild was observed to transiently desync HomeView's
+    // listModel.count-driven moreCount from its still-stale pinnedCount/
+    // recentCount mid-cascade.
+    root.providersLoaded["apps"] = true
+    root.providersLoaded["webapps"] = true
+    root.refreshAppRows()
     invalidateVolatileProvider(activeMenu)
     loadProviderForMenu(activeMenu)
 
@@ -868,6 +1037,7 @@ Item {
     filterText = ""
     selectedIndex = 0
     cursorActive = mode !== "input"
+    root.sidebarFocused = false
     root.disarmPointer()
     opened = true
     rebuildDisplay()
@@ -903,6 +1073,15 @@ Item {
     root.pendingInitialMenu = id
     root.openExistingMenu(id)
     return "ok"
+  }
+
+  // Which Sidebar destination should read as "active" for a given activeMenu.
+  // Settings stays highlighted for any submenu underneath it (e.g. browsing
+  // Setup > Power), not just the exact "setup" id.
+  function sidebarDestinationFor(menuId) {
+    if (menuId === "recent" || menuId === "apps" || menuId === "webapps") return menuId
+    if (menuId === "setup" || root.isDescendantOf(menuId, "setup")) return "setup"
+    return "root"
   }
 
   function disarmPointer() {
@@ -1108,6 +1287,42 @@ Item {
             return
           }
 
+          if (root.tileMode && event.key === Qt.Key_Tab) {
+            root.sidebarFocused = !root.sidebarFocused
+            if (root.sidebarFocused) root.sidebarFocusIndex = root.sidebarIndexFor(root.activeMenu)
+            event.accepted = true
+            return
+          }
+
+          if (root.sidebarFocused) {
+            var homeDestinations = MenuData.homeDestinations()
+            if (event.key === Qt.Key_Up) {
+              root.sidebarFocusIndex = (root.sidebarFocusIndex - 1 + homeDestinations.length) % homeDestinations.length
+              event.accepted = true
+              return
+            }
+            if (event.key === Qt.Key_Down) {
+              root.sidebarFocusIndex = (root.sidebarFocusIndex + 1) % homeDestinations.length
+              event.accepted = true
+              return
+            }
+            if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Right) {
+              root.sidebarFocused = false
+              root.setActiveMenu(homeDestinations[root.sidebarFocusIndex].id, true)
+              event.accepted = true
+              return
+            }
+            if (event.key === Qt.Key_Escape || event.key === Qt.Key_Left) {
+              root.sidebarFocused = false
+              event.accepted = true
+              return
+            }
+            // Any other key (typing to search, PageUp/Down, Delete, ...):
+            // drop sidebar focus and fall through to the normal handling
+            // below, so it never lingers highlighted once the user moves on.
+            root.sidebarFocused = false
+          }
+
           if (event.key === Qt.Key_Delete) {
             root.requestDeleteSelected()
             event.accepted = true
@@ -1172,55 +1387,106 @@ Item {
         }
       }
 
-      Column {
+      Row {
         anchors.fill: parent
         anchors.topMargin: card.contentTopInset
         anchors.rightMargin: card.contentRightInset
         anchors.bottomMargin: card.contentBottomInset
         anchors.leftMargin: card.contentLeftInset
-        spacing: root.contentSpacing
+        spacing: root.tileMode ? root.sidebarContentGap : 0
 
-        Rectangle {
-          width: parent.width
-          height: root.headerHeight
-          radius: root.cornerRadius
-          color: "transparent"
-
-          Text {
-            textFormat: Text.PlainText
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            text: root.filterText || (root.dmenuActive ? (root.dmenuPrompt + "…") : ((root.item(root.activeMenu) ? (root.item(root.activeMenu).title || root.item(root.activeMenu).label) : "Go") + "…"))
-            color: root.foreground
-            opacity: root.filterText ? 1 : 0.58
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.heading
-            elide: Text.ElideRight
-          }
+        // Home-only persistent nav (Home/Apps/Web Apps/Recent/Settings).
+        // Plain submenus and dmenu keep today's simple header+list card —
+        // extending the sidebar to Apps/Web Apps browsing is stage 4.
+        Sidebar {
+          id: sidebar
+          visible: root.tileMode
+          width: root.tileMode ? root.sidebarWidth : 0
+          height: parent.height
+          activeDestination: root.sidebarDestinationFor(root.activeMenu)
+          focused: root.sidebarFocused
+          focusedIndex: root.sidebarFocusIndex
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          cornerRadius: root.cornerRadius
+          onNavigate: function(id) { root.sidebarFocused = false; root.setActiveMenu(id, true) }
         }
 
-        Item {
-          width: parent.width
-          height: root.visibleRowsHeight
+        Column {
+          width: parent.width - (root.tileMode ? (root.sidebarWidth + root.sidebarContentGap) : 0)
+          height: parent.height
+          spacing: root.contentSpacing
 
-          // Exactly one of the three views ever exists — swapped whenever
-          // the mode that selects between them changes, not per keystroke
-          // (tileMode/appBrowseMode/mode:"input" all only change on
-          // navigation, not on selection or search-text edits).
-          Loader {
-            id: viewLoader
-            anchors.fill: parent
-            active: root.rowsLoaded && !(root.dmenuActive && root.mode === "input")
-            sourceComponent: root.tileMode ? tileViewComponent
-              : root.appBrowseMode ? appBrowserViewComponent
-              : listViewComponent
+          Rectangle {
+            width: parent.width
+            height: root.headerHeight
+            radius: root.cornerRadius
+            color: "transparent"
+
+            Row {
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(10)
+
+              // Accent-tinted monogram in place of a profile photo — no
+              // reliable avatar-photo backend exists on this system without
+              // a new dependency, see the redesign plan.
+              Rectangle {
+                visible: root.tileMode
+                width: Style.space(28)
+                height: Style.space(28)
+                radius: width / 2
+                color: themePalette.accent
+                anchors.verticalCenter: parent.verticalCenter
+
+                Text {
+                  anchors.centerIn: parent
+                  textFormat: Text.PlainText
+                  text: (Quickshell.env("USER") || Quickshell.env("LOGNAME") || "?").charAt(0).toUpperCase()
+                  color: "#ffffff"
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  font.weight: Font.Bold
+                }
+              }
+
+              Text {
+                textFormat: Text.PlainText
+                width: parent.width - (root.tileMode ? Style.space(38) : 0)
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.filterText || (root.dmenuActive ? (root.dmenuPrompt + "…") : (root.tileMode ? root.greetingText() : ((root.activeMenu === "recent" ? "Recent" : (root.item(root.activeMenu) ? (root.item(root.activeMenu).title || root.item(root.activeMenu).label) : "Go")) + "…")))
+                color: root.foreground
+                opacity: root.filterText ? 1 : 0.58
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.heading
+                elide: Text.ElideRight
+              }
+            }
           }
-        }
 
-        Item {
-          width: parent.width
-          height: 0
+          Item {
+            width: parent.width
+            height: root.visibleRowsHeight
+
+            // Exactly one of the three views ever exists — swapped whenever
+            // the mode that selects between them changes, not per keystroke
+            // (tileMode/appBrowseMode/mode:"input" all only change on
+            // navigation, not on selection or search-text edits).
+            Loader {
+              id: viewLoader
+              anchors.fill: parent
+              active: root.rowsLoaded && !(root.dmenuActive && root.mode === "input")
+              sourceComponent: root.tileMode ? tileViewComponent
+                : root.appBrowseMode ? appBrowserViewComponent
+                : listViewComponent
+            }
+          }
+
+          Item {
+            width: parent.width
+            height: 0
+          }
         }
       }
     }
@@ -1228,16 +1494,23 @@ Item {
 
   Component {
     id: tileViewComponent
-    RootTileView {
-      model: displayModel
-      tileSizePx: root.tileSize
+    HomeView {
+      listModel: displayModel
+      pinnedCount: root.homeSections.pinned
+      recentCount: root.homeSections.recent
+      columns: root.tileColumns
       cellSize: root.tileCellSize
+      tileSizePx: root.tileSize
+      layoutSerial: root.layoutSerial
       cursorActive: root.cursorActive
       selectedIndex: root.selectedIndex
       cornerRadius: root.cornerRadius
       fontFamily: root.fontFamily
+      foreground: root.foreground
+      appTileSurface: themePalette.surfaceElevated
       selectedBorderSpec: root.selectedBorderSpec
       colorFor: function(index) { return themePalette.colorFor(index) }
+      appIconSource: function(icon) { return appSourceService.iconSource(icon) }
       onHoverSelect: function(index, item, mouse) { root.selectFromPointer(index, item, mouse) }
       onActivate: function(index) {
         root.cursorActive = true
@@ -1302,6 +1575,7 @@ Item {
       panelWidth: root.infoPanelWidth
       gap: root.browseGap
       appSource: appSourceService
+      pinStore: pinStoreService
       itemFor: function(id) { return root.item(id) }
       onHoverSelect: function(index, item, mouse) { root.selectFromPointer(index, item, mouse) }
       onActivate: function(index) {

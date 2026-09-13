@@ -13,9 +13,12 @@ Item {
   property string categoriesText: ""
   property string iconSource: ""
   property bool pathsReady: false
+  property bool pinned: false
   property color foreground: Color.menu.text
   property string fontFamily: Style.font.menuFamily
 
+  signal openRequested()
+  signal pinToggleRequested()
   signal openLocationRequested()
   signal copyCommandRequested()
   signal uninstallRequested()
@@ -101,6 +104,24 @@ Item {
       width: parent.width
       height: Style.spacing.hairline
       color: Util.alpha(panel.foreground, 0.2)
+    }
+
+    Button {
+      width: parent.width
+      leftAlign: true
+      text: "Open"
+      foreground: panel.foreground
+      fontFamily: panel.fontFamily
+      onClicked: panel.openRequested()
+    }
+
+    Button {
+      width: parent.width
+      leftAlign: true
+      text: panel.pinned ? "Unpin from Home" : "Pin to Home"
+      foreground: panel.foreground
+      fontFamily: panel.fontFamily
+      onClicked: panel.pinToggleRequested()
     }
 
     Button {

@@ -1,3 +1,22 @@
+// Sidebar destinations for the Home redesign — fixed, independent of
+// whatever ids exist in JSONC, so Sidebar.qml and Menu.qml's keyboard index
+// math share exactly one definition instead of two hand-kept copies.
+var HOME_DESTINATIONS = [
+  { id: "root", icon: "󰋜", label: "Home" },
+  { id: "apps", icon: "󰀻", label: "Apps" },
+  { id: "webapps", icon: "󰖟", label: "Web Apps" },
+  { id: "recent", icon: "󰋚", label: "Recent" },
+  { id: "setup", icon: "󰒓", label: "Settings" }
+]
+
+// A top-level `var` here isn't reachable as MenuData.HOME_DESTINATIONS from
+// QML (this file has no `.pragma library`, so only top-level *functions* are
+// exposed on the imported namespace — matching every other value this file
+// shares, e.g. guardScript() rather than a bare GUARD_READERS property).
+function homeDestinations() {
+  return HOME_DESTINATIONS
+}
+
 function stripJsonc(raw) {
   return String(raw || "")
     .replace(/^\s*\/\/[^\n]*(\n|$)/gm, "")
@@ -484,6 +503,7 @@ function guardScript(items) {
 
 if (typeof module !== "undefined") {
   module.exports = {
+    homeDestinations: homeDestinations,
     guardReaders: GUARD_READERS,
     guardScript: guardScript,
     stripJsonc: stripJsonc,

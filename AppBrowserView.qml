@@ -34,6 +34,9 @@ Item {
   property int gap: Style.space(14)
 
   required property var appSource
+  // Optional: not required, so this view keeps working if a future caller
+  // ever wires it up without pin support rather than hard-failing.
+  property var pinStore: null
   // function(id) -> the underlying merged item (for comment/categoriesText,
   // which displayRow() doesn't carry through to the display model)
   required property var itemFor
@@ -101,8 +104,11 @@ Item {
       categoriesText: root.selectedEntry ? root.selectedEntry.categoriesText : ""
       iconSource: root.selectedRow ? root.appSource.iconSource(root.selectedRow.appIcon) : ""
       pathsReady: root.appSource.pathsReady(root.selectedAppId)
+      pinned: root.pinStore ? root.pinStore.isPinned(root.selectedAppId) : false
       foreground: root.foreground
       fontFamily: root.fontFamily
+      onOpenRequested: root.activate(root.selectedIndex)
+      onPinToggleRequested: if (root.pinStore) root.pinStore.togglePin(root.selectedAppId)
       onOpenLocationRequested: root.appSource.openFileLocation(root.selectedAppId)
       onCopyCommandRequested: root.appSource.copyLaunchCommand(root.selectedAppId)
       onUninstallRequested: root.uninstallRequested()
