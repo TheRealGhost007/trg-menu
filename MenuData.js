@@ -1,21 +1,57 @@
 // Sidebar destinations for the Home redesign — fixed, independent of
 // whatever ids exist in JSONC, so Sidebar.qml and Menu.qml's keyboard index
 // math share exactly one definition instead of two hand-kept copies.
-var HOME_DESTINATIONS = [
+//
+// "apps" (the generic, everything-grouped-by-category view) is deliberately
+// NOT a Sidebar button — the per-category destinations below replace it
+// there. It still works as a route: Omarchy's own SUPER+ALT+SPACE keybinding
+// (`omarchy-menu toggle apps`, see /usr/share/omarchy/default/hypr/bindings/
+// utilities.lua) summons it directly, so Menu.qml keeps it fully functional,
+// just unlisted here.
+var HOME_LEADING_DESTINATIONS = [
   { id: "root", icon: "󰋜", label: "Home" },
-  { id: "apps", icon: "󰀻", label: "Apps" },
   { id: "webapps", icon: "󰖟", label: "Web Apps" },
-  { id: "steam", icon: "󰓓", label: "Steam" },
+  { id: "steam", icon: "󰓓", label: "Steam" }
+]
+var HOME_TRAILING_DESTINATIONS = [
   { id: "recent", icon: "󰋚", label: "Recent" },
   { id: "setup", icon: "󰒓", label: "Settings" }
 ]
 
-// A top-level `var` here isn't reachable as MenuData.HOME_DESTINATIONS from
-// QML (this file has no `.pragma library`, so only top-level *functions* are
-// exposed on the imported namespace — matching every other value this file
-// shares, e.g. guardScript() rather than a bare GUARD_READERS property).
-function homeDestinations() {
-  return HOME_DESTINATIONS
+// Icon per app category (freedesktop primary categories AppSource.qml
+// recognizes, plus its "Other" fallback). Best-effort glyph picks —
+// unverified against the installed font at review time, checked visually
+// once rendered; a category that comes up tofu just needs a swap here.
+var CATEGORY_ICONS = {
+  "Game": "󰊗",
+  "Development": "󰅩",
+  "Graphics": "󰆧",
+  "Network": "󰈀",
+  "Office": "󰈙",
+  "AudioVideo": "󰝚",
+  "System": "󰒓",
+  "Settings": "󰒓",
+  "Utility": "󰦋",
+  "Education": "󰑴",
+  "Other": "󰘔"
+}
+
+function categoryIcon(name) {
+  return CATEGORY_ICONS[name] || CATEGORY_ICONS["Other"]
+}
+
+// Full ordered Sidebar list: the static leading destinations, then one
+// dynamic destination per currently-installed app category (see Menu.qml's
+// refreshAppRows(), which computes `categories` from what's actually
+// installed — never a fixed list, so a category with nothing in it never
+// shows a dead button), then the static trailing destinations.
+function homeDestinations(categories) {
+  var dynamic = []
+  var cats = Array.isArray(categories) ? categories : []
+  for (var i = 0; i < cats.length; i++) {
+    dynamic.push({ id: "category." + cats[i], icon: categoryIcon(cats[i]), label: cats[i] })
+  }
+  return HOME_LEADING_DESTINATIONS.concat(dynamic, HOME_TRAILING_DESTINATIONS)
 }
 
 function stripJsonc(raw) {

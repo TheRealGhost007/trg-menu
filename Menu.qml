@@ -79,6 +79,14 @@ Item {
   property var itemOrder: []
   property var navStack: []
   property var providersLoaded: ({})
+  // Distinct app categories currently installed (see refreshAppRows()) —
+  // drives the Sidebar's dynamic per-category destinations.
+  property var appCategories: []
+  // Sorted-id-set fingerprint of the last successfully merged app/webapp/
+  // steam rows — lets refreshAppRows() skip all merge/rebuild work when
+  // DesktopEntries fires with no actual content change. See the comment
+  // in refreshAppRows() for how this was confirmed necessary.
+  property string lastAppRowsKey: ""
   property var providerQueue: []
   property int providerRevision: 0
 
@@ -91,7 +99,7 @@ Item {
 
   function sidebarIndexFor(menuId) {
     var destinationId = root.sidebarDestinationFor(menuId)
-    var destinations = MenuData.homeDestinations()
+    var destinations = MenuData.homeDestinations(root.appCategories)
     for (var i = 0; i < destinations.length; i++) {
       if (destinations[i].id === destinationId) return i
     }
@@ -149,7 +157,7 @@ Item {
   // cardWidth (below) still clamps to the screen, so a narrow output fits
   // fewer than tileIdealColumns — derive the real count from the width it
   // actually got, or height/keyboard nav would assume columns never drawn.
-  readonly property int sidebarWidth: Style.space(176)
+  readonly property int sidebarWidth: Style.space(208)
   readonly property int sidebarContentGap: Style.space(18)
   readonly property int tileContentWidth: cardWidth - contentMargin * 2 - cardBorderInsetH - (root.tileMode ? (sidebarWidth + sidebarContentGap) : 0)
   readonly property int tileColumns: root.tileMode ? Math.max(1, Math.floor(tileContentWidth / tileCellSize)) : tileIdealColumns
@@ -192,14 +200,15 @@ Item {
   // Apps/Web Apps get a wider card with a side panel showing details for
   // whichever row is highlighted. Every other submenu, dmenu mode, and the
   // root tile grid are unaffected.
-  // "recent"/"steam" are synthetic menu ids (no JSONC entry) — "steam" has
-  // real child items (its rows carry parent: "steam", same as apps/webapps,
-  // just split out at AppSource.buildRows() instead of listed under apps),
-  // "recent" has none and pulls straight from RecentStore in rebuildDisplay().
-  // Both reuse AppBrowserView exactly like apps/webapps.
-  readonly property bool appBrowseMode: !root.dmenuActive && (root.activeMenu === "apps" || root.activeMenu === "webapps" || root.activeMenu === "steam" || root.activeMenu === "recent")
-  readonly property int browseListWidth: Style.space(300)
-  readonly property int infoPanelWidth: Style.space(260)
+  // "recent"/"steam"/"category.<Name>" are synthetic menu ids (no JSONC
+  // entry) — "steam" and "category.*" have real child items (rows carry
+  // parent: "steam" or parent: "apps" + a matching category field), just
+  // filtered/split out in rebuildDisplay()/AppSource.buildRows() instead of
+  // listed together; "recent" has none and pulls straight from RecentStore.
+  // All reuse AppBrowserView exactly like apps/webapps.
+  readonly property bool appBrowseMode: !root.dmenuActive && (root.activeMenu === "apps" || root.activeMenu === "webapps" || root.activeMenu === "steam" || root.activeMenu === "recent" || root.activeMenu.indexOf("category.") === 0)
+  readonly property int browseListWidth: Style.space(360)
+  readonly property int infoPanelWidth: Style.space(300)
   readonly property int browseGap: Style.space(14)
   // The persistent nav shows on Home and while browsing Apps/Web Apps/
   // Recent — every destination it links to — but not in a plain drilldown
@@ -250,13 +259,62 @@ Item {
     // Steam (see the "apps" sort above) already limits *how far* such a
     // reshuffle can reach; this closes the remaining gap by id instead of
     // index.
+    var rows = appSourceService.buildRows()
+    var allRows = rows.apps.concat(rows.webapps, rows.steam)
+
+    // CONFIRMED via instrumentation (2026-09-13): DesktopEntries.applications
+    // fires onValuesChanged on a steady ~500ms cadence *even fully idle*, with
+    // its reported count oscillating in a narrow band (e.g. 73-77) — verified
+    // via `find ... -newermt` across every XDG applications dir plus `pgrep
+    // steam` that nothing was actually installed/changed. The 400ms debounce
+    // above does nothing for this: each gap between firings exceeds 400ms, so
+    // it fires on schedule every cycle instead of coalescing a burst. Every
+    // firing was unconditionally rebuilding root.items/itemOrder and calling
+    // rebuildDisplay(), which — for tileMode's Home view — reassigns brand-new
+    // JS array objects to HomeView's pinnedRows/recentRows/moreRows, and a
+    // Repeater given a *new* array (not an in-place mutation) tears down and
+    // recreates every delegate. Confirmed via Component.onCompleted/
+    // onDestruction logging: ~1 create+destroy burst per tile roughly every
+    // 500ms, visible as a hover flicker whenever it happened to land while
+    // the cursor sat over a tile. Comparing the actual id set before doing
+    // any of that work — not a longer/smarter debounce — is what actually
+    // stops it, since the content most of these firings report is identical.
+    var incomingIds = []
+    for (var ri = 0; ri < allRows.length; ri++) incomingIds.push(allRows[ri].id)
+    incomingIds.sort()
+    var incomingKey = incomingIds.join("")
+    if (incomingKey === root.lastAppRowsKey) return
+    root.lastAppRowsKey = incomingKey
+
     var selectedId = (root.cursorActive && root.selectedIndex >= 0 && root.selectedIndex < displayModel.count)
       ? displayModel.get(root.selectedIndex).itemId : ""
 
-    var rows = appSourceService.buildRows()
-    var merged = MenuData.mergeAppRows(root.items, root.itemOrder, rows.apps.concat(rows.webapps, rows.steam))
+    var merged = MenuData.mergeAppRows(root.items, root.itemOrder, allRows)
     root.items = merged.items
     root.itemOrder = merged.itemOrder
+
+    // Sidebar's per-category destinations are dynamic — computed from what's
+    // actually installed, not a fixed 10-entry list — so a user with no
+    // Education apps never gets a dead "Education" button. "Other" (the
+    // catch-all for anything with no recognized category) always sorts last.
+    // Only reassigned when the actual set of categories changed, so an
+    // unrelated app-list refresh (e.g. Steam churn settling) doesn't cause a
+    // spurious Sidebar rebuild.
+    var categorySet = ({})
+    for (var ci2 = 0; ci2 < rows.apps.length; ci2++) categorySet[rows.apps[ci2].category] = true
+    var nextCategories = Object.keys(categorySet).sort(function(a, b) {
+      if (a === "Other") return 1
+      if (b === "Other") return -1
+      return a < b ? -1 : (a > b ? 1 : 0)
+    })
+    var categoriesChanged = nextCategories.length !== root.appCategories.length
+    if (!categoriesChanged) {
+      for (var cc = 0; cc < nextCategories.length; cc++) {
+        if (nextCategories[cc] !== root.appCategories[cc]) { categoriesChanged = true; break }
+      }
+    }
+    if (categoriesChanged) root.appCategories = nextCategories
+
     if (root.opened) {
       root.rebuildDisplay()
       if (selectedId) root.restoreSelectionById(selectedId)
@@ -278,7 +336,17 @@ Item {
   property int cardWidth: Math.min(root.tileMode ? Math.ceil(sidebarWidth + sidebarContentGap + tileGridWidth + contentMargin * 2 + cardBorderInsetH)
       : root.appBrowseMode ? Math.ceil(sidebarWidth + sidebarContentGap + browseListWidth + browseGap + infoPanelWidth + contentMargin * 2 + cardBorderInsetH)
       : (root.dmenuActive ? Style.space(root.dmenuWidth) : ((root.activeMenu === "trigger.capture.screenrecord" || root.activeMenu === "style.font") ? Style.space(520) : Style.space(300))), panel.width - Style.gapsOut * 2)
-  property int visibleRowsHeight: root.tileMode ? homeContentHeight : (root.dmenuActive ? dmenuRowListHeight(layoutSerial, displayModel.count, filterText) : rowListHeight(layoutSerial, displayModel.count, filterText, searchDivider))
+  // Per-category destinations make the Sidebar open-ended — its natural
+  // height can now exceed a short view's own content (a small category like
+  // "Education" next to a 16-destination Sidebar). Found via testing: without
+  // this floor, the Sidebar was silently clipped/force-scrolled even though
+  // there's plenty of screen space, rather than the card just growing to fit
+  // it like everything else here already does.
+  readonly property int sidebarRowUnit: Style.space(40) + Style.space(4)
+  readonly property int sidebarNaturalHeight: root.sidebarMode
+    ? (MenuData.homeDestinations(root.appCategories).length * root.sidebarRowUnit - Style.space(4)) : 0
+  property int visibleRowsHeight: Math.max(root.sidebarNaturalHeight,
+    root.tileMode ? homeContentHeight : (root.dmenuActive ? dmenuRowListHeight(layoutSerial, displayModel.count, filterText) : rowListHeight(layoutSerial, displayModel.count, filterText, searchDivider)))
   property int cardHeight: root.dmenuActive
     ? Math.min(contentMargin * 2 + headerHeight + (mode === "input" ? 0 : contentSpacing + visibleRowsHeight), panel.height - Style.gapsOut * 2)
     : Math.min(contentMargin * 2 + headerHeight + contentSpacing + visibleRowsHeight, panel.height - Style.gapsOut * 2)
@@ -327,9 +395,10 @@ Item {
     // a longer submenu scrolls behind the fold instead of growing the card.
     if (panel.maxRowsHeight >= 0) available = Math.min(available, panel.maxRowsHeight)
     // A card that swallows the whole screen reads as a page, not a menu —
-    // except Apps/Web Apps, which routinely hold far more entries than any
-    // other menu and benefit from showing more of the list at once.
-    var capFraction = root.appBrowseMode ? 0.88 : 0.7
+    // except Apps/Web Apps/Steam/category views and Home (sidebarMode),
+    // which routinely hold far more entries than a plain submenu and
+    // benefit from showing more of the list at once without scrolling.
+    var capFraction = root.sidebarMode ? 0.94 : 0.85
     return Math.min(available, Math.round(panel.height * capFraction))
   }
 
@@ -406,6 +475,23 @@ Item {
 
   function item(id) {
     return root.items[id] || null
+  }
+
+  // "recent"/"steam"/"category.<Name>" are menu ids with no JSONC entry —
+  // every guard that resets an unknown activeMenu id back to "root" has to
+  // let these through instead. One place to extend as more get added,
+  // rather than a matching string check duplicated at every call site.
+  function isSyntheticMenuId(id) {
+    return id === "recent" || id === "steam" || String(id || "").indexOf("category.") === 0
+  }
+
+  // Header title for any menu id, synthetic or real.
+  function menuTitleFor(id) {
+    if (id === "recent") return "Recent"
+    if (id === "steam") return "Steam"
+    if (id.indexOf("category.") === 0) return id.substring("category.".length)
+    var entry = root.item(id)
+    return entry ? (entry.title || entry.label) : "Go"
   }
 
   // Pinned/recent store rows only, ever: a bare desktop appId (e.g.
@@ -571,10 +657,11 @@ Item {
   }
 
   function loadProviderForMenu(id) {
-    // Recent/Steam have no JSONC entry/provider of their own — they just
-    // need the same native app rows apps/webapps load, so opening either
-    // directly (without ever visiting Apps first) still resolves entries.
-    if (id === "recent" || id === "steam") {
+    // Recent/Steam/per-category views have no JSONC entry/provider of their
+    // own — they just need the same native app rows apps/webapps load, so
+    // opening one directly (without ever visiting Apps first) still
+    // resolves entries.
+    if (root.isSyntheticMenuId(id)) {
       if (!root.providersLoaded[id]) {
         root.providersLoaded[id] = true
         root.providersLoaded["apps"] = true
@@ -738,7 +825,7 @@ Item {
 
     if (!root.rowsLoaded) return
 
-    var active = (root.activeMenu === "recent" || root.activeMenu === "steam" || root.item(root.activeMenu)) ? root.activeMenu : "root"
+    var active = (root.isSyntheticMenuId(root.activeMenu) || root.item(root.activeMenu)) ? root.activeMenu : "root"
     root.activeMenu = active
     var rows = []
     var query = root.filterText.trim()
@@ -754,6 +841,17 @@ Item {
         var recentQueryEntry = root.appItemForId(recentSearchIds[rq])
         if (recentQueryEntry && root.matchesQuery(recentQueryEntry, recentQuery))
           rows.push(root.displayRow(recentQueryEntry, recentQueryEntry.description, rq))
+      }
+    } else if (query && active.indexOf("category.") === 0) {
+      // Same reason as "recent" above: every category row's real parent is
+      // "apps", not "category.<Name>", so isDescendantOf() would find
+      // nothing — filter by the category field directly instead.
+      var wantCategoryQuery = active.substring("category.".length)
+      for (var cq = 0; cq < root.itemOrder.length; cq++) {
+        var catQueryEntry = root.item(root.itemOrder[cq])
+        if (!catQueryEntry || catQueryEntry.parent !== "apps" || catQueryEntry.category !== wantCategoryQuery) continue
+        if (!root.matchesQuery(catQueryEntry, query)) continue
+        rows.push(root.displayRow(catQueryEntry, catQueryEntry.description, catQueryEntry.order))
       }
     } else if (query) {
       var currentRows = []
@@ -791,6 +889,24 @@ Item {
         var recentEntry = root.appItemForId(recentIds[r])
         if (recentEntry) rows.push(root.displayRow(recentEntry, recentEntry.description, r))
       }
+    } else if (active.indexOf("category.") === 0) {
+      // Also synthetic — every row's real parent is "apps", filtered here by
+      // category instead of collected as root.itemOrder siblings of this id.
+      var wantCategory = active.substring("category.".length)
+      var categoryRows = []
+      for (var cp = 0; cp < root.itemOrder.length; cp++) {
+        var catEntry2 = root.item(root.itemOrder[cp])
+        if (catEntry2 && catEntry2.parent === "apps" && catEntry2.category === wantCategory)
+          categoryRows.push(catEntry2)
+      }
+      for (var cs = 0; cs < categoryRows.length; cs++) {
+        rows.push(root.displayRow(categoryRows[cs], categoryRows[cs].description, categoryRows[cs].order))
+      }
+      rows.sort(function(a, b) {
+        var aLabel = String(a.label || "").toLowerCase()
+        var bLabel = String(b.label || "").toLowerCase()
+        return aLabel < bLabel ? -1 : (aLabel > bLabel ? 1 : 0)
+      })
     } else {
       var siblings = []
       for (var j = 0; j < root.itemOrder.length; j++) {
@@ -940,7 +1056,7 @@ Item {
   function setActiveMenu(id, pushHistory, fromPointer) {
     panel.freezeCardTop()
     root.sidebarFocused = false
-    if (id !== "recent" && id !== "steam" && !root.item(id)) id = "root"
+    if (!root.isSyntheticMenuId(id) && !root.item(id)) id = "root"
     if (pushHistory && id !== root.activeMenu) root.navStack = root.navStack.concat([root.activeMenu])
     root.activeMenu = id
     root.filterText = ""
@@ -1051,7 +1167,7 @@ Item {
     requestActive = false
     selectionFile = ""
     doneFile = ""
-    activeMenu = (initialMenu === "recent" || initialMenu === "steam" || root.item(initialMenu)) ? initialMenu : "root"
+    activeMenu = (root.isSyntheticMenuId(initialMenu) || root.item(initialMenu)) ? initialMenu : "root"
     navStack = []
     filterText = ""
     selectedIndex = 0
@@ -1116,6 +1232,18 @@ Item {
   }
 
   function openRoute(initialMenu) {
+    // Synthetic ids (recent/steam/category.<Name>) have no JSONC alias to
+    // resolve, and resolveRoute() lowercases everything it's given (correct
+    // for JSONC's own lowercase-with-dashes ids, wrong for a category name
+    // like "category.Graphics" — it came back as "category.graphics" and
+    // matched nothing, confirmed via testing: empty list + lowercased
+    // header). Skip resolution for these entirely.
+    var rawId = String(initialMenu || "")
+    if (root.isSyntheticMenuId(rawId)) {
+      root.pendingInitialMenu = rawId
+      root.openExistingMenu(rawId)
+      return "ok"
+    }
     var id = root.resolveRoute(initialMenu)
     var entry = root.items[id]
     // If the resolved id is an action (i.e. the user invoked an alias for
@@ -1135,10 +1263,14 @@ Item {
 
   // Which Sidebar destination should read as "active" for a given activeMenu.
   // Settings stays highlighted for any submenu underneath it (e.g. browsing
-  // Setup > Power), not just the exact "setup" id.
+  // Setup > Power), not just the exact "setup" id. "apps" (only reachable
+  // via the SUPER+ALT+SPACE keybinding now, not a Sidebar button — see the
+  // plan addendum) shows everything across every category, so nothing in
+  // particular should read as active; "" means "no match" to Sidebar.qml.
   function sidebarDestinationFor(menuId) {
-    if (menuId === "recent" || menuId === "apps" || menuId === "webapps" || menuId === "steam") return menuId
+    if (menuId === "recent" || menuId === "webapps" || menuId === "steam" || menuId.indexOf("category.") === 0) return menuId
     if (menuId === "setup" || root.isDescendantOf(menuId, "setup")) return "setup"
+    if (menuId === "apps") return ""
     return "root"
   }
 
@@ -1353,7 +1485,7 @@ Item {
           }
 
           if (root.sidebarFocused) {
-            var homeDestinations = MenuData.homeDestinations()
+            var homeDestinations = MenuData.homeDestinations(root.appCategories)
             if (event.key === Qt.Key_Up) {
               root.sidebarFocusIndex = (root.sidebarFocusIndex - 1 + homeDestinations.length) % homeDestinations.length
               event.accepted = true
@@ -1461,6 +1593,7 @@ Item {
           width: root.sidebarMode ? root.sidebarWidth : 0
           height: parent.height
           activeDestination: root.sidebarDestinationFor(root.activeMenu)
+          categories: root.appCategories
           focused: root.sidebarFocused
           focusedIndex: root.sidebarFocusIndex
           foreground: root.foreground
@@ -1512,7 +1645,7 @@ Item {
                 textFormat: Text.PlainText
                 width: parent.width - (root.tileMode ? Style.space(38) : 0)
                 anchors.verticalCenter: parent.verticalCenter
-                text: root.filterText || (root.dmenuActive ? (root.dmenuPrompt + "…") : (root.tileMode ? root.greetingText() : ((root.activeMenu === "recent" ? "Recent" : root.activeMenu === "steam" ? "Steam" : (root.item(root.activeMenu) ? (root.item(root.activeMenu).title || root.item(root.activeMenu).label) : "Go")) + "…")))
+                text: root.filterText || (root.dmenuActive ? (root.dmenuPrompt + "…") : (root.tileMode ? root.greetingText() : (root.menuTitleFor(root.activeMenu) + "…")))
                 color: root.foreground
                 opacity: root.filterText ? 1 : 0.58
                 font.family: root.fontFamily
