@@ -64,25 +64,27 @@ Item {
 
   // Steam writes/rewrites one .desktop file per installed game, repeatedly,
   // in the background — the confirmed cause of a past hitching incident (see
-  // the appRowsRefreshDebounce comment in Menu.qml). Detecting these lets the
-  // Apps browser put them in their own "Steam" category: real games stay
-  // easy to find as a group, and — the actual stability win — a game being
-  // added/removed no longer shifts the alphabetical position of every
-  // unrelated app that happens to sort after it. `steam://rungameid/` is the
-  // exec pattern Steam's own generated shortcuts use; the Steam client's own
-  // launcher entry has no rungameid and is categorized normally.
+  // the appRowsRefreshDebounce comment in Menu.qml). Detecting these routes
+  // them to their own "steam" parent entirely, split out at buildRows() the
+  // same way Web Apps already are — not a sub-group inside Apps. That way a
+  // game being installed/removed can only reshuffle the Steam list itself;
+  // it can never touch an unrelated app's position/index in Apps at all.
+  // `steam://rungameid/` is the exec pattern Steam's own generated shortcuts
+  // use; the Steam client's own launcher entry has no rungameid and stays a
+  // normal app.
   function isSteamApp(entry) {
     return /steam:\/\/rungameid\//i.test(String((entry && entry.execString) || ""))
   }
 
   // First recognized top-level freedesktop category, e.g. "Game" or
   // "Development" — skips qualifiers like "GTK"/"Qt"/"X-*" that mean nothing
-  // to a user. Falls back to "Other" for an app that declares none.
+  // to a user. Falls back to "Other" for an app that declares none. Only
+  // ever called for a plain Apps row — Steam/Web App rows are split out
+  // before this and don't get sub-categorized.
   readonly property var primaryCategories: ["Game", "Development", "Graphics", "Network",
     "Office", "AudioVideo", "System", "Settings", "Utility", "Education"]
 
   function categoryFor(entry) {
-    if (root.isSteamApp(entry)) return "Steam"
     var cats = (entry && entry.categories && typeof entry.categories.join === "function") ? entry.categories : []
     for (var i = 0; i < cats.length; i++) {
       if (root.primaryCategories.indexOf(cats[i]) >= 0) return cats[i]
@@ -135,14 +137,21 @@ Item {
     onTriggered: root.refreshIconIndex()
   }
 
-  // One pass over every installed app, split into native vs. web rows in
-  // the shape MenuData.mergeAppRows() expects. Comment/categoriesText ride
+  // One pass over every installed app, split into native/web/Steam rows in
+  // the shape MenuData.mergeAppRows() expects. Steam games get their own
+  // parent entirely (not a sub-group inside Apps) — same treatment as Web
+  // Apps, and for the same kind of reason: Steam repeatedly rewrites its
+  // games' .desktop files in the background (the confirmed cause of a past
+  // hitching incident), so keeping them out of the main Apps list means that
+  // churn can never reshuffle an unrelated app's position/index there at
+  // all, not just within a sub-section of it. Comment/categoriesText ride
   // along as extra fields for AppInfoPanel — mergeAppRows keeps unknown
   // keys as-is, and Menu.item() reads them back later.
   function buildRows() {
     var values = (DesktopEntries.applications && DesktopEntries.applications.values) || []
     var appRows = []
     var webappRows = []
+    var steamRows = []
     for (var j = 0; j < values.length; j++) {
       var entry = values[j]
       if (!entry || entry.noDisplay) continue
@@ -156,8 +165,9 @@ Item {
         if (entry.keywords && typeof entry.keywords.join === "function") aliases = aliases.concat(entry.keywords)
       } catch (e) { }
       var isWeb = root.isWebapp(entry)
-      var parentId = isWeb ? "webapps" : "apps"
-      var list = isWeb ? webappRows : appRows
+      var isSteam = !isWeb && root.isSteamApp(entry)
+      var parentId = isWeb ? "webapps" : (isSteam ? "steam" : "apps")
+      var list = isWeb ? webappRows : (isSteam ? steamRows : appRows)
       var categoriesText = (entry.categories && typeof entry.categories.join === "function")
         ? entry.categories.join(", ") : ""
       list.push({
@@ -179,13 +189,14 @@ Item {
         order: 0,
         comment: String(entry.comment || ""),
         categoriesText: categoriesText,
-        category: isWeb ? "" : root.categoryFor(entry)
+        category: (isWeb || isSteam) ? "" : root.categoryFor(entry)
       })
     }
 
     appRows.sort(root.byLabel)
     webappRows.sort(root.byLabel)
-    return { apps: appRows, webapps: webappRows }
+    steamRows.sort(root.byLabel)
+    return { apps: appRows, webapps: webappRows, steam: steamRows }
   }
 
   // ------------------------------------------------------------- actions

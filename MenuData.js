@@ -5,6 +5,7 @@ var HOME_DESTINATIONS = [
   { id: "root", icon: "󰋜", label: "Home" },
   { id: "apps", icon: "󰀻", label: "Apps" },
   { id: "webapps", icon: "󰖟", label: "Web Apps" },
+  { id: "steam", icon: "󰓓", label: "Steam" },
   { id: "recent", icon: "󰋚", label: "Recent" },
   { id: "setup", icon: "󰒓", label: "Settings" }
 ]

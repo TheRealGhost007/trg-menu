@@ -192,10 +192,12 @@ Item {
   // Apps/Web Apps get a wider card with a side panel showing details for
   // whichever row is highlighted. Every other submenu, dmenu mode, and the
   // root tile grid are unaffected.
-  // "recent" is a synthetic menu id (no JSONC entry, no provider) — it reuses
-  // AppBrowserView exactly like apps/webapps, just fed a recency-ordered row
-  // set built in rebuildDisplay() instead of the full alphabetical app list.
-  readonly property bool appBrowseMode: !root.dmenuActive && (root.activeMenu === "apps" || root.activeMenu === "webapps" || root.activeMenu === "recent")
+  // "recent"/"steam" are synthetic menu ids (no JSONC entry) — "steam" has
+  // real child items (its rows carry parent: "steam", same as apps/webapps,
+  // just split out at AppSource.buildRows() instead of listed under apps),
+  // "recent" has none and pulls straight from RecentStore in rebuildDisplay().
+  // Both reuse AppBrowserView exactly like apps/webapps.
+  readonly property bool appBrowseMode: !root.dmenuActive && (root.activeMenu === "apps" || root.activeMenu === "webapps" || root.activeMenu === "steam" || root.activeMenu === "recent")
   readonly property int browseListWidth: Style.space(300)
   readonly property int infoPanelWidth: Style.space(260)
   readonly property int browseGap: Style.space(14)
@@ -227,7 +229,7 @@ Item {
   Connections {
     target: appSourceService
     function onRowsChanged() {
-      if (root.providersLoaded["apps"] || root.providersLoaded["webapps"] || root.providersLoaded["recent"]) appRowsRefreshDebounce.restart()
+      if (root.providersLoaded["apps"] || root.providersLoaded["webapps"] || root.providersLoaded["steam"] || root.providersLoaded["recent"]) appRowsRefreshDebounce.restart()
     }
   }
 
@@ -252,7 +254,7 @@ Item {
       ? displayModel.get(root.selectedIndex).itemId : ""
 
     var rows = appSourceService.buildRows()
-    var merged = MenuData.mergeAppRows(root.items, root.itemOrder, rows.apps.concat(rows.webapps))
+    var merged = MenuData.mergeAppRows(root.items, root.itemOrder, rows.apps.concat(rows.webapps, rows.steam))
     root.items = merged.items
     root.itemOrder = merged.itemOrder
     if (root.opened) {
@@ -407,14 +409,14 @@ Item {
   }
 
   // Pinned/recent store rows only, ever: a bare desktop appId (e.g.
-  // "firefox"), not a full item id. Apps and webapps share the same
-  // namespace, so check both parents; returns null (silently) for an
+  // "firefox"), not a full item id. Apps/webapps/Steam share the same
+  // namespace, so check all three parents; returns null (silently) for an
   // uninstalled/renamed app rather than throwing — pin/recent lists are
   // allowed to hold a stale id that simply never renders.
   function appItemForId(appId) {
     var id = String(appId || "")
     if (!id) return null
-    return root.items["apps." + id] || root.items["webapps." + id] || null
+    return root.items["apps." + id] || root.items["webapps." + id] || root.items["steam." + id] || null
   }
 
   // ------------------------------------------------------------------
@@ -569,12 +571,12 @@ Item {
   }
 
   function loadProviderForMenu(id) {
-    // Recent has no JSONC entry/provider of its own — it just needs the same
-    // native app rows apps/webapps load, so opening Recent directly (without
-    // ever visiting Apps first) still resolves real entries.
-    if (id === "recent") {
-      if (!root.providersLoaded["recent"]) {
-        root.providersLoaded["recent"] = true
+    // Recent/Steam have no JSONC entry/provider of their own — they just
+    // need the same native app rows apps/webapps load, so opening either
+    // directly (without ever visiting Apps first) still resolves entries.
+    if (id === "recent" || id === "steam") {
+      if (!root.providersLoaded[id]) {
+        root.providersLoaded[id] = true
         root.providersLoaded["apps"] = true
         root.providersLoaded["webapps"] = true
         root.refreshAppRows()
@@ -736,7 +738,7 @@ Item {
 
     if (!root.rowsLoaded) return
 
-    var active = (root.activeMenu === "recent" || root.item(root.activeMenu)) ? root.activeMenu : "root"
+    var active = (root.activeMenu === "recent" || root.activeMenu === "steam" || root.item(root.activeMenu)) ? root.activeMenu : "root"
     root.activeMenu = active
     var rows = []
     var query = root.filterText.trim()
@@ -822,28 +824,23 @@ Item {
       }
 
       // DesktopEntries can reorder its values when an application starts.
-      // Keep the Apps/Web Apps menus alphabetical independently of that.
-      // Apps additionally group by category first (Steam's per-game
-      // shortcuts always last — see AppSource.categoryFor()), so a Steam
-      // install/uninstall reshuffling that one group never moves the index
-      // of an unrelated app that happens to sort near it alphabetically.
-      // Recent/Web Apps stay flat — recency order and a single flat list
-      // respectively are the point of those views. One comparator (not a
-      // category pass after an alphabetical pass) so correctness never
-      // depends on Array.sort being stable.
+      // Keep Apps/Web Apps/Steam alphabetical independently of that. Apps
+      // additionally groups by category first — Steam itself is split out
+      // entirely at AppSource.buildRows() (its own parent, not a Apps
+      // sub-group), so a Steam install/uninstall can only ever reshuffle
+      // the Steam list; it can't touch an unrelated app's index in Apps at
+      // all. Recent stays flat in recency order, the point of that view.
+      // One comparator (not a category pass after an alphabetical pass) so
+      // correctness never depends on Array.sort being stable.
       if (active === "apps") {
         for (var ci = 0; ci < rows.length; ci++) {
           var catItem = root.item(rows[ci].itemId)
           rows[ci].section = (catItem && catItem.category) || "Other"
         }
       }
-      if (active === "apps" || active === "webapps") {
+      if (active === "apps" || active === "webapps" || active === "steam") {
         rows.sort(function(a, b) {
-          if (active === "apps" && a.section !== b.section) {
-            if (a.section === "Steam") return 1
-            if (b.section === "Steam") return -1
-            return a.section < b.section ? -1 : 1
-          }
+          if (active === "apps" && a.section !== b.section) return a.section < b.section ? -1 : 1
           var aLabel = String(a.label || "").toLowerCase()
           var bLabel = String(b.label || "").toLowerCase()
           if (aLabel < bLabel) return -1
@@ -943,7 +940,7 @@ Item {
   function setActiveMenu(id, pushHistory, fromPointer) {
     panel.freezeCardTop()
     root.sidebarFocused = false
-    if (id !== "recent" && !root.item(id)) id = "root"
+    if (id !== "recent" && id !== "steam" && !root.item(id)) id = "root"
     if (pushHistory && id !== root.activeMenu) root.navStack = root.navStack.concat([root.activeMenu])
     root.activeMenu = id
     root.filterText = ""
@@ -1054,7 +1051,7 @@ Item {
     requestActive = false
     selectionFile = ""
     doneFile = ""
-    activeMenu = (initialMenu === "recent" || root.item(initialMenu)) ? initialMenu : "root"
+    activeMenu = (initialMenu === "recent" || initialMenu === "steam" || root.item(initialMenu)) ? initialMenu : "root"
     navStack = []
     filterText = ""
     selectedIndex = 0
@@ -1075,6 +1072,7 @@ Item {
     // recentCount mid-cascade.
     root.providersLoaded["apps"] = true
     root.providersLoaded["webapps"] = true
+    root.providersLoaded["steam"] = true
     root.refreshAppRows()
     invalidateVolatileProvider(activeMenu)
     loadProviderForMenu(activeMenu)
@@ -1139,7 +1137,7 @@ Item {
   // Settings stays highlighted for any submenu underneath it (e.g. browsing
   // Setup > Power), not just the exact "setup" id.
   function sidebarDestinationFor(menuId) {
-    if (menuId === "recent" || menuId === "apps" || menuId === "webapps") return menuId
+    if (menuId === "recent" || menuId === "apps" || menuId === "webapps" || menuId === "steam") return menuId
     if (menuId === "setup" || root.isDescendantOf(menuId, "setup")) return "setup"
     return "root"
   }
@@ -1514,7 +1512,7 @@ Item {
                 textFormat: Text.PlainText
                 width: parent.width - (root.tileMode ? Style.space(38) : 0)
                 anchors.verticalCenter: parent.verticalCenter
-                text: root.filterText || (root.dmenuActive ? (root.dmenuPrompt + "…") : (root.tileMode ? root.greetingText() : ((root.activeMenu === "recent" ? "Recent" : (root.item(root.activeMenu) ? (root.item(root.activeMenu).title || root.item(root.activeMenu).label) : "Go")) + "…")))
+                text: root.filterText || (root.dmenuActive ? (root.dmenuPrompt + "…") : (root.tileMode ? root.greetingText() : ((root.activeMenu === "recent" ? "Recent" : root.activeMenu === "steam" ? "Steam" : (root.item(root.activeMenu) ? (root.item(root.activeMenu).title || root.item(root.activeMenu).label) : "Go")) + "…")))
                 color: root.foreground
                 opacity: root.filterText ? 1 : 0.58
                 font.family: root.fontFamily
