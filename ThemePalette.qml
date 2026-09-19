@@ -3,7 +3,7 @@ import Quickshell.Io
 import QtQuick
 import qs.Commons
 
-// Tile colors for RootTileView come straight from the active theme's own
+// Tile colors for Home's glyph tiles (AppTileRow) come straight from the active theme's own
 // named palette (colors.toml) — the same red/orange/yellow/green/cyan/blue
 // /magenta roles every Omarchy theme defines for terminals — so tiles read
 // as "this theme's colors," not an algorithmic guess. Color.qml only

@@ -40,6 +40,34 @@ function categoryIcon(name) {
   return CATEGORY_ICONS[name] || CATEGORY_ICONS["Other"]
 }
 
+// What a category is *called* on screen. The keys are the raw freedesktop
+// names — they stay the identity everywhere else ("category.AudioVideo" menu
+// ids, the rows' own `category` field, IPC routes), so nothing that matches
+// on them changes; this is display-only. Spec names are identifiers, not
+// copy: "AudioVideo" and "Network" aren't words anyone looks for.
+var CATEGORY_LABELS = {
+  "Game": "Games",
+  "Network": "Internet",
+  "AudioVideo": "Audio & Video",
+  "Utility": "Utilities"
+}
+
+function categoryLabel(name) {
+  return CATEGORY_LABELS[name] || String(name || "")
+}
+
+// Category display order, shared by the Sidebar and the Apps view's section
+// headers so the two can't disagree: alphabetical by what's shown on screen
+// (not by raw name), with the "Other" catch-all always last.
+function compareCategories(a, b) {
+  if (a === b) return 0
+  if (a === "Other") return 1
+  if (b === "Other") return -1
+  var al = categoryLabel(a).toLowerCase()
+  var bl = categoryLabel(b).toLowerCase()
+  return al < bl ? -1 : (al > bl ? 1 : 0)
+}
+
 // Full ordered Sidebar list: the static leading destinations, then one
 // dynamic destination per currently-installed app category (see Menu.qml's
 // refreshAppRows(), which computes `categories` from what's actually
@@ -49,7 +77,7 @@ function homeDestinations(categories) {
   var dynamic = []
   var cats = Array.isArray(categories) ? categories : []
   for (var i = 0; i < cats.length; i++) {
-    dynamic.push({ id: "category." + cats[i], icon: categoryIcon(cats[i]), label: cats[i] })
+    dynamic.push({ id: "category." + cats[i], icon: categoryIcon(cats[i]), label: categoryLabel(cats[i]) })
   }
   return HOME_LEADING_DESTINATIONS.concat(dynamic, HOME_TRAILING_DESTINATIONS)
 }
@@ -586,6 +614,9 @@ function guardScript(items) {
 if (typeof module !== "undefined") {
   module.exports = {
     homeDestinations: homeDestinations,
+    categoryLabel: categoryLabel,
+    compareCategories: compareCategories,
+    tileMove: tileMove,
     guardReaders: GUARD_READERS,
     guardScript: guardScript,
     stripJsonc: stripJsonc,

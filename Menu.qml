@@ -9,7 +9,7 @@ import "MenuData.js" as MenuData
 // Root orchestrator: owns the plugin's IPC lifecycle, the shared reactive
 // menu state (items/displayModel/activeMenu/filterText/selection), guard
 // evaluation, and the card/window chrome. Rendering is delegated to one of
-// three view components (RootTileView / ListMenuView / AppBrowserView),
+// three view components (HomeView / ListMenuView / AppBrowserView),
 // swapped by `viewLoader` below based on mode — each exists only while it's
 // actually the active one, so browsing e.g. Style never instantiates the
 // Apps info panel's tree or the app-selection reactivity that goes with it.
@@ -142,7 +142,7 @@ Item {
   // Root menu renders as a colorful tile grid (Start-menu style) instead of
   // the usual list — but only at the top level, with no search running and
   // outside dmenu mode. Column/height math stays here (not in
-  // RootTileView) because the card's own size depends on it before the
+  // HomeView) because the card's own size depends on it before the
   // view even loads.
   readonly property bool tileMode: !root.dmenuActive && root.activeMenu === "root" && !root.filterText.trim()
   readonly property int tileIdealColumns: 4
@@ -210,11 +210,23 @@ Item {
   readonly property int browseListWidth: Style.space(360)
   readonly property int infoPanelWidth: Style.space(300)
   readonly property int browseGap: Style.space(14)
-  // The persistent nav shows on Home and while browsing Apps/Web Apps/
-  // Recent — every destination it links to — but not in a plain drilldown
-  // submenu (Trigger/Style/Setup/...) or dmenu, which keep today's simpler
-  // header+list card.
-  readonly property bool sidebarMode: root.tileMode || root.appBrowseMode
+  // Plain row list, but at Home's card width with the Sidebar still showing.
+  // Two cases, one rule — *every place the Sidebar can take you keeps the
+  // Sidebar*:
+  //  - searching from Home: typing used to flip tileMode off and fall through
+  //    to the stock 300px card, so the first keystroke shrank the card from
+  //    ~700px and dropped the Sidebar, then Escape grew it all back;
+  //  - Settings ("setup" and anything under it): it *is* a Sidebar
+  //    destination, yet clicking it used to throw the Sidebar away — leaving
+  //    sidebarDestinationFor()'s "setup" highlight below with nothing to draw
+  //    on.
+  // A submenu reached any other way (Trigger/Style/... tiles, or a keybinding
+  // summoning e.g. the power menu directly) keeps the compact stock card, as
+  // does dmenu.
+  readonly property bool homeSearchMode: !root.dmenuActive && root.activeMenu === "root" && root.filterText.trim().length > 0
+  readonly property bool settingsMode: !root.dmenuActive && (root.activeMenu === "setup" || root.isDescendantOf(root.activeMenu, "setup"))
+  readonly property bool wideListMode: root.homeSearchMode || root.settingsMode
+  readonly property bool sidebarMode: root.tileMode || root.appBrowseMode || root.wideListMode
 
   // Named *Service/*Store, not appSource/pinStore/recentStore — a component
   // property sharing the instance's own name silently self-references instead
@@ -325,11 +337,7 @@ Item {
     // spurious Sidebar rebuild.
     var categorySet = ({})
     for (var ci2 = 0; ci2 < rows.apps.length; ci2++) categorySet[rows.apps[ci2].category] = true
-    var nextCategories = Object.keys(categorySet).sort(function(a, b) {
-      if (a === "Other") return 1
-      if (b === "Other") return -1
-      return a < b ? -1 : (a > b ? 1 : 0)
-    })
+    var nextCategories = Object.keys(categorySet).sort(MenuData.compareCategories)
     var categoriesChanged = nextCategories.length !== root.appCategories.length
     if (!categoriesChanged) {
       for (var cc = 0; cc < nextCategories.length; cc++) {
@@ -358,7 +366,7 @@ Item {
     }
   }
 
-  property int cardWidth: Math.min(root.tileMode ? Math.ceil(sidebarWidth + sidebarContentGap + tileGridWidth + contentMargin * 2 + cardBorderInsetH)
+  property int cardWidth: Math.min((root.tileMode || root.wideListMode) ? Math.ceil(sidebarWidth + sidebarContentGap + tileGridWidth + contentMargin * 2 + cardBorderInsetH)
       : root.appBrowseMode ? Math.ceil(sidebarWidth + sidebarContentGap + browseListWidth + browseGap + infoPanelWidth + contentMargin * 2 + cardBorderInsetH)
       : (root.dmenuActive ? Style.space(root.dmenuWidth) : ((root.activeMenu === "trigger.capture.screenrecord" || root.activeMenu === "style.font") ? Style.space(520) : Style.space(300))), panel.width - Style.gapsOut * 2)
   // Per-category destinations make the Sidebar open-ended — its natural
@@ -518,7 +526,7 @@ Item {
   function menuTitleFor(id) {
     if (id === "recent") return "Recent"
     if (id === "steam") return "Steam"
-    if (id.indexOf("category.") === 0) return id.substring("category.".length)
+    if (id.indexOf("category.") === 0) return MenuData.categoryLabel(id.substring("category.".length))
     var entry = root.item(id)
     return entry ? (entry.title || entry.label) : "Go"
   }
@@ -992,15 +1000,23 @@ Item {
       // all. Recent stays flat in recency order, the point of that view.
       // One comparator (not a category pass after an alphabetical pass) so
       // correctness never depends on Array.sort being stable.
+      // The section a row *shows* is the category's display label; the order
+      // sections come in is MenuData.compareCategories() on the raw name —
+      // the same comparator the Sidebar uses, so the two never disagree.
+      // Raw names live in a side map, not on the row: rows go straight into
+      // displayModel, and a stray key there becomes a ListModel role.
+      var categoryKeyFor = ({})
       if (active === "apps") {
         for (var ci = 0; ci < rows.length; ci++) {
           var catItem = root.item(rows[ci].itemId)
-          rows[ci].section = (catItem && catItem.category) || "Other"
+          categoryKeyFor[rows[ci].itemId] = (catItem && catItem.category) || "Other"
+          rows[ci].section = MenuData.categoryLabel(categoryKeyFor[rows[ci].itemId])
         }
       }
       if (active === "apps" || active === "webapps" || active === "steam") {
         rows.sort(function(a, b) {
-          if (active === "apps" && a.section !== b.section) return a.section < b.section ? -1 : 1
+          if (active === "apps" && categoryKeyFor[a.itemId] !== categoryKeyFor[b.itemId])
+            return MenuData.compareCategories(categoryKeyFor[a.itemId], categoryKeyFor[b.itemId])
           var aLabel = String(a.label || "").toLowerCase()
           var bLabel = String(b.label || "").toLowerCase()
           if (aLabel < bLabel) return -1
@@ -1067,9 +1083,9 @@ Item {
     })
   }
 
-  // Dispatches to whichever view is currently loaded — RootTileView never
-  // needs this (the grid sizes to fit every root item, so nothing scrolls)
-  // and simply doesn't expose the function, which the check below handles.
+  // Dispatches to whichever view is currently loaded. The typeof check keeps
+  // this safe for a view that has nothing to scroll and so exposes no
+  // revealCursor() at all.
   function revealCursor() {
     if (viewLoader.item && typeof viewLoader.item.revealCursor === "function") viewLoader.item.revealCursor()
   }
@@ -1196,6 +1212,50 @@ Item {
     root.deleteTarget = { appId: row.appId, label: row.label }
     deleteConfirm.selectedIndex = 1
     root.deleteConfirmOpen = true
+  }
+
+  // Keyboard equivalents of AppInfoPanel's buttons (the panel itself is
+  // mouse-only — its hints advertise these). Work on whichever app row holds
+  // the cursor, in any view: a Home tile, an Apps/Recent row, a search hit.
+  // Handled ahead of the search-text branch in keyCatcher, so Ctrl+P can
+  // never land in the filter as a literal "p".
+  //   Ctrl+P  pin/unpin     Ctrl+O  open file location
+  //   Ctrl+C  copy launch command     Delete  uninstall (existing)
+  function handleAppShortcut(event) {
+    if (event.modifiers !== Qt.ControlModifier) return false
+    if (event.key !== Qt.Key_P && event.key !== Qt.Key_O && event.key !== Qt.Key_C) return false
+    if (root.dmenuActive || !root.cursorActive) return false
+    if (root.selectedIndex < 0 || root.selectedIndex >= displayModel.count) return false
+    var row = displayModel.get(root.selectedIndex)
+    if (!row || row.kind !== "app") return false
+
+    if (event.key === Qt.Key_P) {
+      var pinnedItemId = row.itemId
+      pinStoreService.togglePin(row.appId)
+      // Only Home lays rows out by pinned-ness; everywhere else the list is
+      // unchanged and the panel's own binding flips the button label. The
+      // tile just moved sections, so follow it rather than leave the cursor
+      // on whatever slid into its old slot.
+      if (root.tileMode) {
+        root.rebuildDisplay()
+        root.restoreSelectionById(pinnedItemId)
+      }
+    } else if (event.key === Qt.Key_O) {
+      root.dismissAfter(function() { appSourceService.openFileLocation(row.appId) })
+    } else {
+      root.dismissAfter(function() { appSourceService.copyLaunchCommand(row.appId) })
+    }
+    return true
+  }
+
+  // For actions whose result shows up *outside* the menu (a file manager
+  // window, the clipboard): the menu is a fullscreen exclusive-focus overlay,
+  // so leaving it open just hides what the user asked for behind it.
+  function dismissAfter(action) {
+    applySerial = requestSerial
+    action()
+    opened = false
+    filterText = ""
   }
 
   function cancelDelete() {
@@ -1558,7 +1618,10 @@ Item {
             return
           }
 
-          if (root.sidebarMode && event.key === Qt.Key_Tab) {
+          // Backtab is what Shift+Tab arrives as. Focus only has two stops
+          // here (content, sidebar), so both directions are the same toggle —
+          // but without this Shift+Tab fell through to the search handling.
+          if (root.sidebarMode && (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab)) {
             root.sidebarFocused = !root.sidebarFocused
             if (root.sidebarFocused) root.sidebarFocusIndex = root.sidebarIndexFor(root.activeMenu)
             event.accepted = true
@@ -1594,7 +1657,9 @@ Item {
             root.sidebarFocused = false
           }
 
-          if (event.key === Qt.Key_Delete) {
+          if (root.handleAppShortcut(event)) {
+            event.accepted = true
+          } else if (event.key === Qt.Key_Delete) {
             root.requestDeleteSelected()
             event.accepted = true
           } else if (event.key === Qt.Key_Escape) {
@@ -1832,6 +1897,7 @@ Item {
       selectedIndex: root.selectedIndex
       filterText: root.filterText
       layoutSerial: root.layoutSerial
+      showWebBadge: root.activeMenu !== "webapps"
       background: root.background
       foreground: root.foreground
       selectedBackground: root.selectedBackground
@@ -1859,6 +1925,7 @@ Item {
         root.activateIndex(index, true)
       }
       onUninstallRequested: root.requestDeleteSelected()
+      onDismissRequested: function(action) { root.dismissAfter(action) }
     }
   }
 }

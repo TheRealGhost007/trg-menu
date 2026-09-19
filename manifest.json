@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "id": "trg.menu",
-  "name": "My Omarchy menu",
+  "name": "trg-menu",
   "version": "1.0.0",
-  "author": "Omarchy",
-  "description": "Quickshell-powered Omarchy command menu",
+  "author": "trg",
+  "description": "Windows-11-inspired Omarchy menu: sidebar, Home with pinned/recent apps, apps by category",
   "kinds": [
     "menu",
     "bar-widget"
@@ -15,8 +15,8 @@
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "My Omarchy menu",
-    "description": "Launches the Omarchy menu",
+    "displayName": "trg-menu",
+    "description": "Launches trg-menu",
     "category": "Compositor",
     "allowMultiple": false
   },

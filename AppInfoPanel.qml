@@ -106,48 +106,47 @@ Item {
       color: Util.alpha(panel.foreground, 0.2)
     }
 
-    Button {
+    PanelAction {
       width: parent.width
-      leftAlign: true
       text: "Open"
+      hint: "Enter"
       foreground: panel.foreground
       fontFamily: panel.fontFamily
       onClicked: panel.openRequested()
     }
 
-    Button {
+    PanelAction {
       width: parent.width
-      leftAlign: true
       text: panel.pinned ? "Unpin from Home" : "Pin to Home"
+      hint: "Ctrl+P"
       foreground: panel.foreground
       fontFamily: panel.fontFamily
       onClicked: panel.pinToggleRequested()
     }
 
-    Button {
+    PanelAction {
       width: parent.width
-      leftAlign: true
       text: "Open File Location"
+      hint: "Ctrl+O"
       foreground: panel.foreground
       fontFamily: panel.fontFamily
       enabled: panel.pathsReady
-      opacity: enabled ? 1.0 : 0.45
       onClicked: panel.openLocationRequested()
     }
 
-    Button {
+    PanelAction {
       width: parent.width
-      leftAlign: true
       text: "Copy Launch Command"
+      hint: "Ctrl+C"
       foreground: panel.foreground
       fontFamily: panel.fontFamily
       onClicked: panel.copyCommandRequested()
     }
 
-    Button {
+    PanelAction {
       width: parent.width
-      leftAlign: true
       text: "Uninstall"
+      hint: "Del"
       foreground: panel.foreground
       fontFamily: panel.fontFamily
       onClicked: panel.uninstallRequested()

@@ -4,8 +4,9 @@ import qs.Ui
 
 // The row list — every plain submenu, search results, and dmenu-select
 // mode all render through this one component (they already shared the
-// exact same interaction model). Root's tile grid and dmenu-input mode
-// have their own dedicated views instead (RootTileView, InputPromptView).
+// exact same interaction model). Home's tile grid has its own dedicated
+// view instead (HomeView); dmenu-input mode renders no list at all — Menu.qml
+// just deactivates the view Loader and the header carries the typed text.
 Item {
   id: root
 
@@ -33,6 +34,11 @@ Item {
   // function(icon) -> url, only ever called for row.isApp rows (Apps/Web
   // Apps, via AppBrowserView) — left as a no-op default everywhere else.
   property var appIconSource: function() { return "" }
+  // Marks web-app rows with a trailing globe, for lists that mix them with
+  // native apps (Recent, search hits) where a same-named pair — Discord the
+  // app, Discord the web app — is otherwise indistinguishable. Off for the
+  // Web Apps view itself, where every row would carry it and it says nothing.
+  property bool showWebBadge: true
 
   signal hoverSelect(int index, var item, var mouse)
   signal activate(int index)
@@ -131,6 +137,8 @@ Item {
       readonly property bool hasCursor: root.cursorActive && row.index === root.selectedIndex
       readonly property bool isApp: row.kind === "app"
       readonly property bool hasIcon: row.icon.length > 0 || row.isApp
+      readonly property bool isWebapp: row.isApp && row.itemId.indexOf("webapps.") === 0
+      readonly property bool hasWebBadge: root.showWebBadge && row.isWebapp
 
       width: ListView.view.width
       height: root.rowHeightForDetail(row.detail)
@@ -207,13 +215,26 @@ Item {
 
       Row {
         id: trail
-        width: Style.space(14)
+        width: row.hasWebBadge ? Style.space(22) : Style.space(14)
         anchors.right: parent.right
         anchors.rightMargin: root.rowReservedBorderRight + Style.space(8)
         y: contentColumn.y + (contentColumn.height - height) / 2
         spacing: 0
 
+        // An app row never has the "›" below, so the two never share the slot.
         Text {
+          visible: row.hasWebBadge
+          textFormat: Text.PlainText
+          text: "󰖟"
+          color: row.hasCursor ? root.selectedText : root.foreground
+          opacity: 0.4
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          anchors.verticalCenter: parent.verticalCenter
+        }
+
+        Text {
+          visible: !row.hasWebBadge
           textFormat: Text.PlainText
           text: row.kind === "menu" || row.kind === "link" ? "›" : ""
           color: row.hasCursor ? root.selectedText : root.foreground

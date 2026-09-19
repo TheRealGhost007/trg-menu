@@ -14,6 +14,7 @@ Item {
   property int selectedIndex: -1
   property string filterText: ""
   property int layoutSerial: 0
+  property bool showWebBadge: true
 
   property color background: Color.menu.background
   property color foreground: Color.menu.text
@@ -45,6 +46,9 @@ Item {
   signal hoverSelect(int index, var item, var mouse)
   signal activate(int index)
   signal uninstallRequested()
+  // For panel actions whose result lands outside the menu — Menu.qml runs
+  // `action` and closes (see its dismissAfter()).
+  signal dismissRequested(var action)
 
   function revealCursor() { list.revealCursor() }
 
@@ -78,6 +82,7 @@ Item {
       cursorActive: root.cursorActive
       selectedIndex: root.selectedIndex
       filterText: root.filterText
+      showWebBadge: root.showWebBadge
       background: root.background
       foreground: root.foreground
       selectedBackground: root.selectedBackground
@@ -111,8 +116,14 @@ Item {
       fontFamily: root.fontFamily
       onOpenRequested: root.activate(root.selectedIndex)
       onPinToggleRequested: if (root.pinStore) root.pinStore.togglePin(root.selectedAppId)
-      onOpenLocationRequested: root.appSource.openFileLocation(root.selectedAppId)
-      onCopyCommandRequested: root.appSource.copyLaunchCommand(root.selectedAppId)
+      onOpenLocationRequested: {
+        var locationId = root.selectedAppId
+        root.dismissRequested(function() { root.appSource.openFileLocation(locationId) })
+      }
+      onCopyCommandRequested: {
+        var copyId = root.selectedAppId
+        root.dismissRequested(function() { root.appSource.copyLaunchCommand(copyId) })
+      }
       onUninstallRequested: root.uninstallRequested()
     }
   }

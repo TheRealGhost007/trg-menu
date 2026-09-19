@@ -6,8 +6,7 @@ import qs.Ui
 // tile grid for every other root JSONC id (Apps/Web Apps/Settings are
 // promoted to Sidebar destinations instead of appearing here — see
 // Menu.qml's rebuildDisplay()). Only ever loaded while tileMode is active
-// (Menu.qml's viewLoader), same lifecycle discipline as the view it
-// replaces (RootTileView).
+// (Menu.qml's viewLoader), same lifecycle discipline as every other view.
 Item {
   id: root
 
