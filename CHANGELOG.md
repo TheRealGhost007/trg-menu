@@ -115,7 +115,112 @@ touching the item tree or calling `rebuildDisplay()` at all. This closes the
 gap a timing-based debounce can't: it doesn't matter how often the signal
 fires if nothing it reports has actually changed.
 
-**Remaining known limitation:** the underlying ~500ms `DesktopEntries`
-re-emission itself is still unexplained (it appears to be internal to
-Quickshell, not this plugin) — this fix neutralizes its effect rather than
+**Remaining known limitation:** ~~the underlying ~500ms `DesktopEntries`
+re-emission itself is still unexplained~~ — explained below (2026-09-19); it
+is internal to Quickshell, and this fix neutralizes its effect rather than
 its cause.
+
+## The ~500ms `DesktopEntries` churn, identified
+
+**Investigation:** Logged the id set on every `onValuesChanged` and diffed
+consecutive firings. Each ~500ms cycle is a burst of 10 signals inside 1ms:
+the same 5 entries vanish one by one, then reappear one by one (count
+84→79→84). `inotifywait` across every applications dir showed zero
+filesystem activity while it happened. The 5 flapping ids were
+`modrinth-app`, `imv`, `foot`, `mpv`, `com.nvidia.geforcenow` — and listing
+every desktop id present in more than one XDG dir produced *exactly* that
+set, no more, no fewer.
+
+**Root cause:** Quickshell 0.3.1's `DesktopEntries` periodically drops and
+re-adds any entry whose id exists in more than one XDG applications dir (a
+`~/.local/share/applications` override shadowing a `/usr/share` or flatpak
+copy). What triggers its rescan is still internal to Quickshell; *which*
+entries churn, and why the count oscillates by the amount it does, is
+confirmed. Not fixable from a plugin, and deleting the overrides isn't a fix.
+
+## Reopening the menu showed the previous session's rows for ~650ms
+
+**Symptom:** Open any submenu (e.g. Style), close, reopen Home: for the
+first ~650ms Home drew the *submenu's* rows as tiles (Theme, Background,
+Font, ...). Enter inside that window activated the stale row, not the tile
+it appeared to be on.
+
+**Root cause:** A regression between two earlier fixes. `openExistingMenu()`
+had dropped its own `rebuildDisplay()` because `refreshAppRows()` "already
+calls it" — true until the fingerprint fix above gave `refreshAppRows()` an
+early return, which is taken on every open after the first. Nothing rebuilt
+the display until the async guard batch finished (measured headlessly by
+generating the real guard script with node and timing it: 625-735ms).
+Confirmed via a screenshot taken 250ms after reopening.
+
+**Fix:** `refreshAppRows()` returns whether it rebuilt; `openExistingMenu()`
+rebuilds itself when it didn't — exactly one rebuild either way. Verified by
+re-running the same reproduction at the same timing.
+
+## Every app list went empty after a JSONC reload
+
+**Root cause:** `rebuildItemsFromSources()` replaces the item tree with
+JSONC-only content (dropping every app row) but left the app-row fingerprint
+in place, so the next `refreshAppRows()` saw "same apps as last time" and
+never merged them back — Apps, Web Apps, Steam, every category, Pinned and
+Recent all stayed empty until an app was (un)installed or the shell
+restarted. Triggered by editing the user JSONC, `omarchy menu refresh`, or an
+Omarchy update touching the default menu file. Found by code reading (the
+pre-fix failure was not reproduced); the fixed build was verified by forcing
+a reload with `omarchy menu refresh` and opening a category.
+
+**Fix:** Reset the fingerprint alongside the item tree, and re-merge app rows
+immediately if the menu is open.
+
+## Icon index never re-scanned; missing icons stuck forever
+
+**Root cause (two halves):** the rescan sat behind a 750ms debounce
+restarted by a signal that arrives every ~500ms (see the churn entry above)
+— measured: 40 bursts in 20s, largest gap 534ms, zero rescans after the
+startup one. And even had it run, `iconSource()` answers from `iconCache`
+first, where an icon not yet indexed at first draw was cached as the generic
+fallback with nothing ever evicting it.
+
+**Fix:** The rescan is now driven by `refreshAppRows()` detecting a *real*
+change to the app set, not by the raw signal; the cache is dropped when a new
+index lands (index first, then cache — the other order re-caches every miss
+against the old index). The app-row refresh is also skipped entirely while
+the menu is closed, so the churn costs nothing at idle.
+
+## Smaller fixes (2026-09-19)
+
+- The app-row fingerprint covered ids only, so an app update that changed a
+  name/icon/category under the same id was ignored until restart. It now
+  covers every field a row is drawn from.
+- Home's greeting only recomputed when `tileMode` flipped, which a
+  close-from-Home/reopen-to-Home cycle never does — "Good morning" could
+  persist into the evening. Now recomputed per open.
+- Up/Down on Home stepped ±columns through one flat index, but Pinned/
+  Recent/More are separate grids with ragged last rows, so crossing a section
+  landed in the wrong column. Now section-aware (`MenuData.tileMove()`,
+  covered by `tests/menudata.test.js`). PageUp/PageDown clamp instead of
+  wrapping past the end back to the top.
+- "Open File Location" (and "Copy Launch Command") left the menu open — a
+  fullscreen exclusive-focus overlay — so the file manager opened *behind*
+  it. Both now dismiss the menu; the copy confirms via a notification.
+- Browser-installed PWAs (`google-chrome --app-id=…`) were classified as
+  native apps because web-app detection only knew Omarchy's own launcher.
+  Now detected for every Chromium-family browser and listed under Web Apps.
+- Pin/recent state is written via temp-file + rename instead of a truncating
+  redirect, so a crash or two racing saves can't leave an empty file.
+
+## Improvements (2026-09-19)
+
+- Every Sidebar destination keeps the Sidebar and the wide card: searching
+  from Home no longer collapses the card from ~700px to 300px on the first
+  keystroke, and Settings (the whole `setup` tree) no longer drops the
+  Sidebar it was reached from.
+- Keyboard shortcuts for the info panel's actions — `Ctrl+P` pin, `Ctrl+O`
+  open file location, `Ctrl+C` copy launch command — working on any selected
+  app (Home tiles included), with hints shown on the panel's buttons.
+  Pinning from Home follows the tile to its new section.
+- Web-app globe badge on Home tiles and in mixed lists (Recent, search).
+- Friendly category names (Audio & Video, Internet, Games, Utilities); one
+  shared category order for the Sidebar and the Apps view's headers.
+- Shift+Tab toggles Sidebar focus like Tab.
+- Removed dead `RootTileView.qml`; added `tests/menudata.test.js`.

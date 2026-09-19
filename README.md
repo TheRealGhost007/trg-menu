@@ -27,8 +27,25 @@ completely custom.
 - **Category browsing** — native apps are grouped by their real freedesktop
   category, each with its own Sidebar entry and its own view.
 - **Pin apps to Home**, straight from the Apps/Web Apps/Steam info panel.
-- **Full keyboard navigation** — arrow keys, search-as-you-type, Tab to move
-  into/out of the Sidebar, Enter/Backspace, all preserved from the original.
+- **Web apps are marked.** Omarchy web apps *and* browser-installed PWAs
+  (Chrome/Chromium/Brave/Edge `--app-id` entries) are detected, get their own
+  Web Apps view, and carry a small globe badge wherever they're mixed with
+  native apps — so "Discord" and "Discord" on Home are tellable apart.
+- **Full keyboard navigation** — arrow keys (section-aware on Home),
+  search-as-you-type, Tab/Shift+Tab to move into/out of the Sidebar,
+  Enter/Backspace, all preserved from the original. With an app selected
+  anywhere (a Home tile, a list row, a search hit):
+
+  | Key | Action |
+  |---|---|
+  | `Enter` | Open |
+  | `Ctrl+P` | Pin to / unpin from Home |
+  | `Ctrl+O` | Open file location |
+  | `Ctrl+C` | Copy launch command |
+  | `Delete` | Uninstall (asks first) |
+- **The Sidebar stays put.** Every Sidebar destination — including Settings
+  and searching from Home — keeps the Sidebar and the wide card, instead of
+  the card collapsing to the stock narrow list mid-session.
 - **Theme-aware.** Colors come from your active Omarchy theme
   (`colors.toml`/`shell.toml`), not a hardcoded palette.
 
@@ -84,11 +101,21 @@ omarchy plugin remove "$(id -un)".menu
 | `Sidebar.qml` | Persistent left-hand navigation |
 | `HomeView.qml` / `AppTileRow.qml` | Home screen: Pinned/Recent/More tile sections |
 | `ListMenuView.qml` / `AppBrowserView.qml` | Row list and the Apps/Web Apps/Steam/category/Recent split view with info panel |
-| `AppInfoPanel.qml` | App details + actions (Open, Pin, Open File Location, Copy Launch Command, Uninstall) |
+| `AppInfoPanel.qml` / `PanelAction.qml` | App details + actions (Open, Pin, Open File Location, Copy Launch Command, Uninstall), each with its keyboard-shortcut hint |
 | `PinStore.qml` / `RecentStore.qml` | Persisted pinned-apps and recently-launched lists |
 | `ThemePalette.qml` | Reads the active theme's palette for tile colors and design tokens |
 
 See `CHANGELOG.md` for the bugs found and fixed while building this.
+
+## Tests
+
+`MenuData.js` is plain JavaScript with no Quickshell dependency, so its logic
+(Home's section-aware arrow-key navigation, category labels/ordering) is
+tested headlessly — no running shell needed:
+
+```bash
+node tests/menudata.test.js
+```
 
 ## License
 
