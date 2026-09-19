@@ -57,8 +57,15 @@ Item {
   // nothing needs to observe completion.
   function save() {
     var json = JSON.stringify(root.pinnedIds)
+    // Write-then-rename, never a redirect straight onto the real file: `>`
+    // truncates before it writes, so a crash/kill in between — or two saves
+    // racing, each its own detached shell — could leave an empty or half-
+    // written file, which parse() reads back as "nothing saved". rename() is
+    // atomic, and $$ keeps two racing saves off each other's temp file.
+    var tmp = Util.shellQuote(root.path) + ".$$.tmp"
     Util.execDetached("mkdir -p " + Util.shellQuote(Quickshell.env("HOME") + "/.local/state/omarchy")
-      + " && printf '%s' " + Util.shellQuote(json) + " > " + Util.shellQuote(root.path))
+      + " && printf '%s' " + Util.shellQuote(json) + " > " + tmp
+      + " && mv -f " + tmp + " " + Util.shellQuote(root.path))
   }
 
   FileView {

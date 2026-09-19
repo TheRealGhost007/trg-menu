@@ -54,6 +54,51 @@ function homeDestinations(categories) {
   return HOME_LEADING_DESTINATIONS.concat(dynamic, HOME_TRAILING_DESTINATIONS)
 }
 
+// Up/Down on Home. displayModel is one flat list, but Home draws it as up to
+// three separately-wrapped grids (Pinned [0,pinned), Recent [pinned,
+// pinned+recent), More [the rest]), each starting back at column 0 with its
+// own ragged last row. A flat ±columns step only lines up visually inside a
+// full grid: across a section boundary it lands in whatever column the
+// previous section's raggedness shifts it to. This walks rows *within* a
+// section, and crosses into the neighbouring section's nearest row keeping
+// the same column (clamped to a short row's last tile). Falling off either
+// end wraps to the far end, again keeping the column — same wrap-around feel
+// as every list in the menu.
+//
+// `direction` is -1 (up) or 1 (down). Returns the new flat index.
+function tileMove(index, count, pinned, recent, columns, direction) {
+  var cols = Math.max(1, columns | 0)
+  var total = Math.max(0, count | 0)
+  if (total === 0) return 0
+
+  var pinnedLen = Math.max(0, Math.min(pinned | 0, total))
+  var recentLen = Math.max(0, Math.min(recent | 0, total - pinnedLen))
+  var sections = []
+  if (pinnedLen > 0) sections.push({ start: 0, length: pinnedLen })
+  if (recentLen > 0) sections.push({ start: pinnedLen, length: recentLen })
+  if (total - pinnedLen - recentLen > 0) sections.push({ start: pinnedLen + recentLen, length: total - pinnedLen - recentLen })
+
+  var at = Math.max(0, Math.min(index | 0, total - 1))
+  var s = 0
+  while (s < sections.length - 1 && at >= sections[s].start + sections[s].length) s++
+
+  var local = at - sections[s].start
+  var col = local % cols
+  var row = Math.floor(local / cols)
+  var lastRow = function(section) { return Math.floor((section.length - 1) / cols) }
+  var land = function(section, targetRow) {
+    return section.start + Math.min(targetRow * cols + col, section.length - 1)
+  }
+
+  if (direction > 0) {
+    if (row < lastRow(sections[s])) return land(sections[s], row + 1)
+    return land(sections[(s + 1) % sections.length], 0)
+  }
+  if (row > 0) return land(sections[s], row - 1)
+  var previous = sections[(s - 1 + sections.length) % sections.length]
+  return land(previous, lastRow(previous))
+}
+
 function stripJsonc(raw) {
   return String(raw || "")
     .replace(/^\s*\/\/[^\n]*(\n|$)/gm, "")

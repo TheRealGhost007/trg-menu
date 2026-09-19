@@ -6,9 +6,9 @@ import qs.Commons
 // Everything app-related for the menu, in one place: reading installed
 // apps, native-vs-webapp classification, icon resolution (cached), launch/
 // uninstall actions, and the async file-location lookup used by the info
-// panel. Used only by AppBrowserView, so none of this exists at all —
-// no DesktopEntries watcher, no icon cache, no path-lookup Process/Timer —
-// while browsing any other submenu.
+// panel. One instance lives in Menu.qml for the plugin's whole lifetime
+// (Home's Pinned/Recent tiles and root-level search need app rows too, not
+// just AppBrowserView) — so anything in here has to be free while idle.
 //
 // Reads Quickshell's DesktopEntries singleton directly rather than through
 // the shell-provided AppLibrary proxy (shell.appLibrary): on this Omarchy
@@ -58,8 +58,19 @@ Item {
   // and the stock "remove.webapp" when: clause, which detects them the same
   // way from bash). Splitting on that keeps native apps and browser-backed
   // webapps in separate submenus instead of interleaved alphabetically.
+  //
+  // The other kind is a PWA installed from the browser's own "Install app"
+  // button: Chromium-family browsers (Chrome, Chromium, Brave, Edge, Vivaldi)
+  // all write a chrome-<id>-<Profile>.desktop whose Exec is the browser
+  // binary with --app-id=<32 chars a-p>. Just as much a web app, but the
+  // Omarchy-launcher test alone filed these under Apps (found on this machine:
+  // GitHub, Claude, VirusTotal), so they got no web-app badge and sat among
+  // native apps. The id's fixed shape keeps this from catching an ordinary
+  // app that happens to take some other --app-id flag.
   function isWebapp(entry) {
-    return /^\s*(omarchy-launch-webapp|omarchy-webapp-handler)\b/.test(String((entry && entry.execString) || ""))
+    var exec = String((entry && entry.execString) || "")
+    return /^\s*(omarchy-launch-webapp|omarchy-webapp-handler)\b/.test(exec)
+      || /\s--app-id=[a-p]{32}(\s|$)/.test(exec)
   }
 
   // Steam writes/rewrites one .desktop file per installed game, repeatedly,
@@ -117,24 +128,26 @@ Item {
     return null
   }
 
-  // Fires whenever the underlying app list might have changed (install/
-  // uninstall, hidden-list reload) — AppBrowserView listens and re-merges.
+  // Fires whenever the underlying app list *might* have changed (install/
+  // uninstall, hidden-list reload) — Menu.qml listens and re-merges. "Might"
+  // is doing real work there: see the Connections comment below.
   signal rowsChanged()
 
+  // This signal is NOT a reliable "something was installed" event. Measured
+  // (2026-09-19, Quickshell 0.3.1): it fires in bursts of 10 every ~500ms,
+  // forever, fully idle, with zero inotify activity in any applications dir
+  // — each burst being the same entries vanishing and reappearing, and those
+  // entries being exactly the desktop ids present in more than one XDG dir
+  // (a ~/.local/share/applications override shadowing a /usr/share or
+  // flatpak copy). So nothing expensive may hang off it directly, and no
+  // plain debounce can tame it: an icon-index rescan used to sit here behind
+  // a 750ms debounce, which a signal arriving every ~500ms restarts forever
+  // — confirmed it never fired once after startup. Menu.qml's
+  // refreshAppRows() decides whether the app set *really* changed (by
+  // content fingerprint) and calls refreshIconIndex() itself when it did.
   Connections {
     target: DesktopEntries.applications
-    function onValuesChanged() {
-      root.rowsChanged()
-      iconIndexRescanDebounce.restart()
-    }
-  }
-
-  // A fresh install may need icons this process hasn't indexed yet.
-  // Coalesces a burst of app-list changes into a single re-scan.
-  Timer {
-    id: iconIndexRescanDebounce
-    interval: 750
-    onTriggered: root.refreshIconIndex()
+    function onValuesChanged() { root.rowsChanged() }
   }
 
   // One pass over every installed app, split into native/web/Steam rows in
@@ -219,14 +232,30 @@ Item {
     var entry = root.findEntry(appId)
     var execString = entry ? String(entry.execString || "") : ""
     if (!execString) return
-    Quickshell.execDetached(["bash", "-c", "printf %s " + Util.shellQuote(execString) + " | wl-copy"])
+    // The menu closes right after this (clipboard contents are invisible,
+    // and the next thing anyone does with them is paste somewhere else), so
+    // the notification is the only confirmation the copy happened.
+    Quickshell.execDetached(["bash", "-c", "printf %s " + Util.shellQuote(execString) + " | wl-copy"
+      + "; command -v notify-send >/dev/null && notify-send -t 2500 'Launch command copied' " + Util.shellQuote(execString)])
   }
+
+  // Opens now if the paths are already looked up, otherwise as soon as the
+  // lookup lands. The panel's button only enables once they're ready, but
+  // Ctrl+O has no such gate — pressed inside AppBrowserView's 150ms lookup
+  // debounce (or from Home, which never requests paths at all) it used to
+  // have nothing to open and silently did nothing.
+  property string pendingOpenId: ""
 
   function openFileLocation(appId) {
     var id = String(appId || "")
     if (!id) return
     var paths = root.pathCache[id]
-    if (!paths) return
+    if (!paths) {
+      root.pendingOpenId = id
+      root.requestPaths(id)
+      return
+    }
+    root.pendingOpenId = ""
     var entry = root.findEntry(id)
     var isWeb = entry ? root.isWebapp(entry) : false
     var dir = isWeb ? paths.desktopDir : (paths.execDir || paths.desktopDir)
@@ -286,9 +315,21 @@ Item {
     command: ["bash", "-c", root.iconIndexScanCommand()]
     stdout: SplitParser { onRead: function(line) { root.indexIconLine(line) } }
     onStarted: root.pendingIconIndex = ({})
-    // Swapping the property re-evaluates every iconSource() binding, so
-    // newly found icons appear without rebuilding the app list.
-    onExited: root.iconIndex = root.pendingIconIndex
+    // Swapping the index alone isn't enough to make newly found icons
+    // appear: iconSource() answers from iconCache first, and an icon that
+    // wasn't indexed yet when its row first drew is cached there as the
+    // generic fallback — permanently, since nothing else ever evicted it
+    // (a fresh install opened before this scan finished kept the placeholder
+    // until the shell restarted). Drop the cache along with the swap.
+    //
+    // Order matters: index first, cache second. Reassigning iconCache is
+    // what re-evaluates every iconSource() binding (they all read it); doing
+    // that *before* the new index is in place would just re-resolve — and
+    // re-cache — every miss against the old one.
+    onExited: {
+      root.iconIndex = root.pendingIconIndex
+      root.iconCache = ({})
+    }
   }
 
   Component.onCompleted: root.refreshIconIndex()
@@ -312,8 +353,10 @@ Item {
       var themed = Quickshell.iconPath(value, true)
       resolved = themed.length > 0 ? themed : Quickshell.iconPath("application-x-executable", true)
     }
-    // Mutated in place, not reassigned — nothing binds to this property
-    // itself, so it doesn't need to be a fresh object each time.
+    // Mutated in place, not reassigned — a per-icon write must not notify,
+    // or every resolved icon would re-evaluate every other icon's binding.
+    // The one deliberate reassignment is iconIndexScan's onExited, which
+    // wants exactly that (see there).
     root.iconCache[value] = resolved
     return resolved
   }
@@ -392,6 +435,8 @@ Item {
       for (var k in root.pathCache) next[k] = root.pathCache[k]
       next[lookupProc.appId] = { desktopDir: desktopDir, execDir: execDir }
       root.pathCache = next
+
+      if (root.pendingOpenId === lookupProc.appId) root.openFileLocation(lookupProc.appId)
 
       if (root.pendingId && root.pendingId !== lookupProc.appId) {
         var pending = root.pendingId

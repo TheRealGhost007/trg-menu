@@ -237,7 +237,13 @@ Item {
   // slightly after the fact).
   Connections {
     target: appSourceService
+    // Only while open. The signal behind this fires ~2x/second forever even
+    // at idle (see AppSource.qml's Connections comment), and each pass it
+    // lets through costs a full buildRows() + sort + fingerprint — pointless
+    // with the menu closed, since openExistingMenu() always refreshes on the
+    // way in anyway.
     function onRowsChanged() {
+      if (!root.opened) return
       if (root.providersLoaded["apps"] || root.providersLoaded["webapps"] || root.providersLoaded["steam"] || root.providersLoaded["recent"]) appRowsRefreshDebounce.restart()
     }
   }
@@ -279,11 +285,28 @@ Item {
     // the cursor sat over a tile. Comparing the actual id set before doing
     // any of that work — not a longer/smarter debounce — is what actually
     // stops it, since the content most of these firings report is identical.
+    //
+    // The key covers every field a row is drawn/grouped from, not just its
+    // id — an app update that renames an entry or swaps its icon/category
+    // keeps the same desktop id, and an id-only key would ignore it until the
+    // shell restarted.
+    //
+    // Returns whether it rebuilt the display, so a caller that needs a
+    // rebuild either way (openExistingMenu) knows to do its own when this
+    // early-returns instead of silently getting none.
     var incomingIds = []
-    for (var ri = 0; ri < allRows.length; ri++) incomingIds.push(allRows[ri].id)
+    for (var ri = 0; ri < allRows.length; ri++) {
+      var keyRow = allRows[ri]
+      incomingIds.push([keyRow.id, keyRow.label, keyRow.appIcon, keyRow.category, keyRow.description].join("\u0001"))
+    }
     incomingIds.sort()
-    var incomingKey = incomingIds.join("")
-    if (incomingKey === root.lastAppRowsKey) return
+    var incomingKey = incomingIds.join("\n")
+    if (incomingKey === root.lastAppRowsKey) return false
+    // A real change to the app set is the one moment a fresh install may
+    // need icons the index hasn't seen. Not on the first merge ("" key):
+    // AppSource already scans once at startup, and a JSONC reload (which
+    // also resets the key) changes no icons.
+    if (root.lastAppRowsKey) appSourceService.refreshIconIndex()
     root.lastAppRowsKey = incomingKey
 
     var selectedId = (root.cursorActive && root.selectedIndex >= 0 && root.selectedIndex < displayModel.count)
@@ -318,7 +341,9 @@ Item {
     if (root.opened) {
       root.rebuildDisplay()
       if (selectedId) root.restoreSelectionById(selectedId)
+      return true
     }
+    return false
   }
 
   // Re-finds a row by itemId after a rebuild and restores selectedIndex to
@@ -463,12 +488,16 @@ Item {
     return foldedListHeight(totals, available)
   }
 
-  // Home's greeting header. Recomputed whenever tileMode flips true (the
-  // property read makes it a binding dependency), which covers every menu
-  // open/close — freshness beyond that isn't worth tracking a clock for.
-  function greetingText() {
+  // Home's greeting header. `_serial` is requestSerial, bumped on every open
+  // — tileMode alone isn't a usable dependency: closing from Home and
+  // reopening to Home never flips it, so the greeting computed at the first
+  // open used to stick ("Good morning" well into the evening) until a search
+  // or submenu visit happened to toggle it. Freshness beyond once-per-open
+  // isn't worth tracking a clock for. Late night stays "evening": "Good
+  // night" reads as a goodbye, not a greeting.
+  function greetingText(_serial) {
     var hour = new Date().getHours()
-    var part = hour < 5 ? "night" : hour < 12 ? "morning" : hour < 17 ? "afternoon" : hour < 21 ? "evening" : "night"
+    var part = (hour >= 5 && hour < 12) ? "morning" : (hour >= 12 && hour < 17) ? "afternoon" : "evening"
     var user = Quickshell.env("USER") || Quickshell.env("LOGNAME") || "there"
     return "Good " + part + ", " + user
   }
@@ -537,10 +566,25 @@ Item {
     root.items = mergedMenu.items
     root.itemOrder = mergedMenu.itemOrder
     root.rowsLoaded = true
+    // The merge above just replaced root.items with JSONC-only content — every
+    // app row is gone from it. The fingerprint has to go with them, or the
+    // next refreshAppRows() sees "same apps as last time", early-returns, and
+    // never merges them back: Apps/Web Apps/Steam/categories/Pinned/Recent
+    // would all stay empty until an app was (un)installed or the shell
+    // restarted.
+    root.lastAppRowsKey = ""
     root.evaluateGuards()
     if (root.opened) {
-      root.rebuildDisplay()
-      if (!root.dmenuActive) {
+      if (root.dmenuActive) {
+        root.rebuildDisplay()
+      } else {
+        // Same eager app-row merge openExistingMenu() does, for the same
+        // reason (Home's Pinned/Recent resolve against these rows whatever
+        // the active menu is) — and the same exactly-one-rebuild rule.
+        root.providersLoaded["apps"] = true
+        root.providersLoaded["webapps"] = true
+        root.providersLoaded["steam"] = true
+        if (!root.refreshAppRows()) root.rebuildDisplay()
         if (root.filterText.trim()) root.loadProvidersForSearch()
         else root.loadProviderForMenu(root.activeMenu)
       }
@@ -1043,6 +1087,38 @@ Item {
     revealCursor()
   }
 
+  // Up/Down on Home — section-aware, see MenuData.tileMove(). Left/Right stay
+  // on select(±1): reading order across sections is exactly the flat order.
+  function selectTile(direction) {
+    if (displayModel.count === 0) return
+
+    root.disarmPointer()
+    if (!cursorActive) {
+      cursorActive = true
+      selectedIndex = direction < 0 ? displayModel.count - 1 : 0
+    } else {
+      selectedIndex = MenuData.tileMove(selectedIndex, displayModel.count, root.homeSections.pinned, root.homeSections.recent, root.tileColumns, direction)
+    }
+    revealCursor()
+  }
+
+  // PageUp/PageDown. Clamps rather than wraps: a single-row step wrapping
+  // from the last row to the first is a deliberate shortcut, but a page jump
+  // near the end of a list landing somewhere near the *top* just loses your
+  // place — it should stop at the end it was heading for.
+  function selectPage(delta) {
+    if (displayModel.count === 0) return
+
+    root.disarmPointer()
+    if (!cursorActive) {
+      cursorActive = true
+      selectedIndex = delta < 0 ? displayModel.count - 1 : 0
+    } else {
+      selectedIndex = Math.max(0, Math.min(displayModel.count - 1, selectedIndex + delta))
+    }
+    revealCursor()
+  }
+
   function setFilter(nextFilter) {
     panel.freezeCardTop()
     root.filterText = nextFilter
@@ -1181,15 +1257,20 @@ Item {
     // This is a plain in-memory merge of DesktopEntries' already-resident
     // list (see AppSource.buildRows()) — no filesystem scan, so it's cheap
     // enough to just always do on open rather than only when non-empty.
-    // refreshAppRows() already calls rebuildDisplay() once opened is true
-    // (set above) — don't call it again here, a second back-to-back
-    // clear()+rebuild was observed to transiently desync HomeView's
+    // refreshAppRows() calls rebuildDisplay() itself when the app set changed
+    // — but it early-returns (no rebuild) when its fingerprint matches, which
+    // is every open after the first. Exactly one rebuild has to happen here
+    // either way: none leaves displayModel holding the *previous* session's
+    // rows until the async guard batch lands ~650ms later (confirmed via
+    // screenshot: Home drew the Style submenu's rows as tiles, and Enter in
+    // that window activated the stale row), while two back-to-back
+    // clear()+rebuilds were observed to transiently desync HomeView's
     // listModel.count-driven moreCount from its still-stale pinnedCount/
     // recentCount mid-cascade.
     root.providersLoaded["apps"] = true
     root.providersLoaded["webapps"] = true
     root.providersLoaded["steam"] = true
-    root.refreshAppRows()
+    if (!root.refreshAppRows()) root.rebuildDisplay()
     invalidateVolatileProvider(activeMenu)
     loadProviderForMenu(activeMenu)
 
@@ -1533,16 +1614,18 @@ Item {
             root.goBack()
             event.accepted = true
           } else if (event.key === Qt.Key_Up) {
-            root.select(root.tileMode ? -root.tileColumns : -1)
+            if (root.tileMode) root.selectTile(-1)
+            else root.select(-1)
             event.accepted = true
           } else if (event.key === Qt.Key_Down) {
-            root.select(root.tileMode ? root.tileColumns : 1)
+            if (root.tileMode) root.selectTile(1)
+            else root.select(1)
             event.accepted = true
           } else if (event.key === Qt.Key_PageUp) {
-            root.select(-6)
+            root.selectPage(-6)
             event.accepted = true
           } else if (event.key === Qt.Key_PageDown) {
-            root.select(6)
+            root.selectPage(6)
             event.accepted = true
           } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Right) {
             if (root.dmenuActive) {
@@ -1645,7 +1728,7 @@ Item {
                 textFormat: Text.PlainText
                 width: parent.width - (root.tileMode ? Style.space(38) : 0)
                 anchors.verticalCenter: parent.verticalCenter
-                text: root.filterText || (root.dmenuActive ? (root.dmenuPrompt + "…") : (root.tileMode ? root.greetingText() : (root.menuTitleFor(root.activeMenu) + "…")))
+                text: root.filterText || (root.dmenuActive ? (root.dmenuPrompt + "…") : (root.tileMode ? root.greetingText(root.requestSerial) : (root.menuTitleFor(root.activeMenu) + "…")))
                 color: root.foreground
                 opacity: root.filterText ? 1 : 0.58
                 font.family: root.fontFamily
